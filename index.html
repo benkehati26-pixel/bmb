@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14213D">
+<meta name="description" content="יומן עבודה יומי למנהל עבודה – BMB · Ben Menachem Bari">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="BMB יומן">
+<title>BMB · יומן עבודה</title>
+<link rel="icon" href="icons/logo.svg" type="image/svg+xml">
+<link rel="icon" href="icons/favicon-32.png" sizes="32x32" type="image/png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<svg class="sprite" width="0" height="0" style="position:absolute;overflow:hidden" aria-hidden="true">
+  <defs>
+    <linearGradient id="bmbNavy" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#21406F"/><stop offset="1" stop-color="#0E1A31"/></linearGradient>
+  </defs>
+  <symbol id="bmb-logo" viewBox="0 0 100 100">
+    <rect width="100" height="100" rx="22" fill="url(#bmbNavy)"/>
+    <rect x="5" y="5" width="90" height="90" rx="18" fill="none" stroke="#F59E0B" stroke-opacity=".38" stroke-width="1.2"/>
+    <g fill="none" stroke="#fff" stroke-width="6" stroke-linejoin="round" stroke-linecap="round">
+      <path d="M15.5 42H23.5A6.5 6.5 0 0 1 23.5 55H15.5V29H22.5A6.5 6.5 0 0 1 22.5 42H15.5Z"/>
+      <path d="M41 55V29L50 46L59 29V55"/>
+      <path d="M70 42H78A6.5 6.5 0 0 1 78 55H70V29H77A6.5 6.5 0 0 1 77 42H70Z"/>
+    </g>
+    <rect x="13" y="64.5" width="74" height="5" rx="2.5" fill="#F59E0B"/>
+    <rect x="13" y="73" width="8" height="2.4" rx="1.2" fill="#F59E0B" fill-opacity=".55"/>
+    <rect x="79" y="73" width="8" height="2.4" rx="1.2" fill="#F59E0B" fill-opacity=".55"/>
+  </symbol>
+</svg>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 100 100" role="img" aria-label="BMB"><use href="#bmb-logo"/></svg>
+    <div class="brand-text">
+      <span class="brand-title">יומן עבודה</span>
+      <span class="brand-sub" dir="ltr">Ben Menachem Bari</span>
+    </div>
+  </div>
+  <span id="netStatus" class="net" title="מצב חיבור"></span>
+</header>
+
+<main id="app">
+  <!-- ===== LOG ===== -->
+  <section id="view-log" class="view active" aria-label="יומן">
+    <div class="card date-card">
+      <button class="icon-btn" id="prevDay" aria-label="יום קודם">›</button>
+      <label class="date-wrap">
+        <span class="weekday" id="weekday"></span>
+        <input type="date" id="f-date" aria-label="תאריך">
+      </label>
+      <button class="icon-btn" id="nextDay" aria-label="יום הבא">‹</button>
+    </div>
+    <div class="status-row"><span id="saveStatus" class="badge"></span><button class="link-btn" id="todayBtn">חזרה להיום</button></div>
+
+    <form id="logForm" class="card form" autocomplete="off" onsubmit="return false">
+      <label class="field">
+        <span>🏗️ שם האתר</span>
+        <input id="f-site" list="sitesList" placeholder="לדוגמה: מגדלי הים – בניין B" enterkeyhint="next">
+        <datalist id="sitesList"></datalist>
+      </label>
+
+      <div class="field">
+        <span>⏰ שעות עבודה</span>
+        <div class="hours">
+          <label><small>התחלה</small><input type="time" id="f-start"></label>
+          <label><small>סיום</small><input type="time" id="f-end"></label>
+          <div class="total"><small>סה״כ</small><b id="totalHours">—</b></div>
+        </div>
+      </div>
+
+      <div class="field">
+        <span>🌤️ מזג אוויר <em>(לא חובה)</em></span>
+        <div class="chips" id="weatherChips">
+          <button type="button" class="chip">☀️ שמשי</button>
+          <button type="button" class="chip">🔥 חם</button>
+          <button type="button" class="chip">⛅ מעונן חלקית</button>
+          <button type="button" class="chip">🌧️ גשם</button>
+          <button type="button" class="chip">💨 רוחות</button>
+        </div>
+        <input id="f-weather" placeholder="או כתוב חופשי">
+      </div>
+
+      <div class="field">
+        <span>👷 נוכחים באתר – פועלים, קבלני משנה, ציוד</span>
+        <div id="crewList" class="crew-list"></div>
+        <button type="button" class="btn ghost" id="addCrew">＋ הוסף שורה</button>
+      </div>
+
+      <label class="field">
+        <span>🛠️ עבודות שבוצעו</span>
+        <textarea id="f-work" rows="5" placeholder="• חפירה לקורות יסוד&#10;• יציקת כלונסאות 12–15"></textarea>
+      </label>
+
+      <label class="field">
+        <span>📝 הערות</span>
+        <textarea id="f-notes" rows="3" placeholder="בטיחות, עיכובים, אספקות, ביקור מפקח..."></textarea>
+      </label>
+    </form>
+
+    <div class="actions">
+      <button class="btn primary big" id="saveBtn">💾 שמור יומן</button>
+      <button class="btn whatsapp" id="waBtn"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2a10 10 0 0 0-8.6 15.1L2 22l5-1.3A10 10 0 1 0 12 2Zm0 18.2a8.2 8.2 0 0 1-4.2-1.1l-.3-.2-3 .8.8-2.9-.2-.3A8.2 8.2 0 1 1 12 20.2Zm4.5-6.1c-.2-.1-1.5-.7-1.7-.8-.2-.1-.4-.1-.6.1l-.8 1c-.1.2-.3.2-.5.1a6.7 6.7 0 0 1-3.3-2.9c-.3-.4.2-.4.7-1.4.1-.2 0-.3 0-.4l-.8-1.8c-.2-.5-.4-.4-.6-.4h-.5a1 1 0 0 0-.7.3 3 3 0 0 0-.9 2.2 5.2 5.2 0 0 0 1.1 2.7 11.8 11.8 0 0 0 4.5 4c1.7.7 2.3.8 3.2.6.5-.1 1.5-.6 1.7-1.2.2-.6.2-1.1.2-1.2-.1-.1-.3-.2-.5-.3Z"/></svg> שלח בוואטסאפ</button>
+      <div class="grid3">
+        <button class="btn" id="shareBtn">📤 שיתוף</button>
+        <button class="btn" id="copyBtn">📋 העתק טקסט</button>
+        <button class="btn" id="printBtn">🖨️ הדפס / PDF</button>
+      </div>
+      <button class="btn danger-ghost" id="clearDayBtn">🗑️ נקה את היום</button>
+    </div>
+  </section>
+
+  <!-- ===== CHAT ===== -->
+  <section id="view-chat" class="view" aria-label="עוזר AI">
+    <div class="chat-head">
+      <div>
+        <h2>✨ עוזר AI</h2>
+        <p>כתוב חופשי מה היה היום – אנסח יומן מקצועי ואמלא אחרי אישורך.</p>
+      </div>
+      <button class="link-btn" id="newChat">שיחה חדשה</button>
+    </div>
+    <div id="chatLog" class="chat-log"></div>
+    <div class="composer">
+      <textarea id="chatInput" rows="1" placeholder="למשל: היו היום 3 פועלים של מאג'ד, מחפר, יצקנו כלונסאות 12-15, עבדנו 7 עד 16"></textarea>
+      <button id="chatSend" class="send" aria-label="שלח"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M3.4 20.4 21 12 3.4 3.6 3.4 10l12.6 2-12.6 2z" transform="matrix(-1 0 0 1 24 0)"/></svg></button>
+    </div>
+  </section>
+
+  <!-- ===== HISTORY ===== -->
+  <section id="view-history" class="view" aria-label="היסטוריה">
+    <div class="card">
+      <input id="histSearch" type="search" placeholder="🔎 חיפוש לפי אתר, עבודה, שם...">
+    </div>
+    <div id="histList" class="hist-list"></div>
+    <div class="card backup">
+      <h3>גיבוי</h3>
+      <p class="muted">הנתונים נשמרים רק במכשיר הזה. מומלץ לייצא גיבוי מדי פעם.</p>
+      <div class="grid2">
+        <button class="btn" id="exportBtn">⬇️ ייצוא JSON</button>
+        <label class="btn" for="importFile">⬆️ ייבוא JSON</label>
+      </div>
+      <input type="file" id="importFile" accept="application/json,.json" hidden>
+    </div>
+  </section>
+
+  <!-- ===== SETTINGS ===== -->
+  <section id="view-settings" class="view" aria-label="הגדרות">
+    <div class="card">
+      <h3>🔑 מפתח Anthropic API (עבור עוזר ה-AI)</h3>
+      <p class="muted">המפתח נשמר <b>רק במכשיר הזה</b> (localStorage) ונשלח ישירות ל-Anthropic. הוא לא נשמר בשום שרת או בקוד.</p>
+      <div class="key-row">
+        <input id="apiKey" type="password" placeholder="sk-ant-..." autocomplete="off" autocapitalize="off" spellcheck="false" dir="ltr">
+        <button class="icon-btn" id="toggleKey" aria-label="הצג/הסתר">👁️</button>
+      </div>
+      <div class="grid3">
+        <button class="btn primary" id="saveKey">שמור מפתח</button>
+        <button class="btn" id="testKey">בדוק חיבור</button>
+        <button class="btn danger-ghost" id="clearKey">מחק מפתח</button>
+      </div>
+      <p id="keyStatus" class="muted small"></p>
+      <label class="field">
+        <span>מודל</span>
+        <select id="model" dir="ltr">
+          <option value="claude-sonnet-5-5">claude-sonnet-5-5 (מומלץ)</option>
+          <option value="claude-sonnet-5">claude-sonnet-5</option>
+          <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+          <option value="claude-sonnet-4-5-20250929">claude-sonnet-4-5</option>
+          <option value="claude-haiku-5-5">claude-haiku-5-5 (מהיר וזול)</option>
+        </select>
+      </label>
+    </div>
+    <div class="card">
+      <h3>👷 פרטים</h3>
+      <label class="field"><span>שם מנהל העבודה (מופיע בהודעה ובהדפסה)</span><input id="foreman"></label>
+      <label class="field"><span>חברה / כותרת משנה (לא חובה)</span><input id="company" placeholder="לדוגמה: שם החברה המבצעת"></label>
+      <button class="btn primary" id="saveProfile">שמור פרטים</button>
+    </div>
+    <div class="card">
+      <h3>📱 התקנה באייפון</h3>
+      <p class="muted">ב-Safari: לחץ על כפתור השיתוף <b>⬆️</b> ← <b>הוסף למסך הבית</b>. האפליקציה תיפתח במסך מלא ותעבוד גם בלי אינטרנט (חוץ מעוזר ה-AI).</p>
+    </div>
+    <p class="footer-note" dir="ltr">BMB · Ben Menachem Bari · v<span id="ver"></span></p>
+  </section>
+</main>
+
+<nav class="tabbar" aria-label="ניווט">
+  <button data-view="log" class="active"><span>📋</span>יומן</button>
+  <button data-view="chat"><span>✨</span>עוזר AI</button>
+  <button data-view="history"><span>🗂️</span>היסטוריה</button>
+  <button data-view="settings"><span>⚙️</span>הגדרות</button>
+</nav>
+
+<div id="toast" role="status" aria-live="polite"></div>
+<div id="printArea" aria-hidden="true"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

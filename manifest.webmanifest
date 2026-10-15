@@ -1,0 +1,19 @@
+{
+  "name": "BMB · יומן עבודה",
+  "short_name": "BMB יומן",
+  "description": "יומן עבודה יומי למנהל עבודה – Ben Menachem Bari",
+  "lang": "he",
+  "dir": "rtl",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F3F5F9",
+  "theme_color": "#14213D",
+  "icons": [
+    { "src": "icons/logo.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
