@@ -1,13 +1,13 @@
 /* BMB work log – service worker: offline app shell. AI calls (api.anthropic.com) are never cached. */
-const VERSION = 'bmb-v1.0.0';
+const VERSION = 'bmb-v1.1.0';
 const SHELL = [
-  './', './index.html', './style.css', './app.js', './manifest.webmanifest',
+  './', './index.html', './style.css', './app.js', './excel.js', './vendor/exceljs.min.js', './manifest.webmanifest',
   './icons/logo.svg', './icons/favicon-32.png', './icons/icon-192.png', './icons/icon-512.png',
   './icons/apple-touch-icon.png', './icons/maskable-512.png'
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {

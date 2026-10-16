@@ -5,7 +5,8 @@
  */
 'use strict';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
+const LS_LOGO = 'bmb.companyLogo.v1';
 const LS_ENTRIES = 'bmb.entries.v1';
 const LS_SETTINGS = 'bmb.settings.v1';
 const LS_CHAT = 'bmb.chat.v1';
@@ -32,6 +33,36 @@ const store = {
   saveSettings(patch) { localStorage.setItem(LS_SETTINGS, JSON.stringify(Object.assign(this.settings(), patch))); },
 };
 
+const companyLogo = {
+  get() { try { return JSON.parse(localStorage.getItem(LS_LOGO)) || null; } catch { return null; } },
+  set(v) { localStorage.setItem(LS_LOGO, JSON.stringify(v)); },
+  clear() { localStorage.removeItem(LS_LOGO); },
+};
+
+/** Resize an image file to fit maxW×maxH, returns {dataUrl,w,h}. PNG keeps transparency; falls back to JPEG if large. */
+function resizeImage(file, maxW = 480, maxH = 240) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const k = Math.min(1, maxW / img.naturalWidth, maxH / img.naturalHeight);
+      const w = Math.max(1, Math.round(img.naturalWidth * k)), h = Math.max(1, Math.round(img.naturalHeight * k));
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      const ctx = c.getContext('2d'); ctx.imageSmoothingQuality = 'high'; ctx.drawImage(img, 0, 0, w, h);
+      let dataUrl = c.toDataURL('image/png');
+      if (dataUrl.length > 350000) {
+        const c2 = document.createElement('canvas'); c2.width = w; c2.height = h;
+        const x = c2.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, w, h); x.drawImage(c, 0, 0);
+        dataUrl = c2.toDataURL('image/jpeg', 0.88);
+      }
+      resolve({ dataUrl, w, h });
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('לא ניתן לקרוא את התמונה')); };
+    img.src = url;
+  });
+}
+
 /* ---------------- dates & hours ---------------- */
 const pad = (n) => String(n).padStart(2, '0');
 const isoOf = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -53,7 +84,7 @@ const fmtDur = (m) => (m == null ? '—' : `${Math.floor(m / 60)}:${pad(m % 60)}
 const hoursText = (m) => { const h = Math.round((m / 60) * 100) / 100; return h === 1 ? 'שעה אחת' : `${h} שעות`; };
 
 /* ---------------- entry model ---------------- */
-const blankEntry = (date) => ({ date, site: '', start: '', end: '', weather: '', crew: [], work: '', notes: '' });
+const blankEntry = (date) => ({ date, site: '', company: store.settings().company || '', start: '', end: '', weather: '', crew: [], work: '', notes: '' });
 const hasContent = (e) => !!(e.site || e.start || e.end || e.weather || e.work || e.notes || e.crew.some((c) => c.name));
 let current = blankEntry(todayISO());
 let dirty = false;
@@ -79,6 +110,7 @@ function formatLog(e, bold = true) {
   const s = store.settings();
   const L = [B(`📋 יומן עבודה – יום ${weekday(e.date).replace(/^יום\s*/, '')}, ${fmtDate(e.date)}`)];
   if (e.site) L.push(`🏗️ אתר: ${e.site}`);
+  if (e.company) L.push(`🏢 חברת בנייה: ${e.company}`);
   if (s.foreman) L.push(`👷 מנהל עבודה: ${s.foreman}`);
   if (e.start || e.end) {
     const m = minutesBetween(e.start, e.end);
@@ -89,7 +121,7 @@ function formatLog(e, bold = true) {
   if (crew.length) { L.push('', B('נוכחים באתר:')); crew.forEach((c) => L.push(`• ${crewLine(c)}`)); }
   if (e.work && e.work.trim()) { L.push('', B('עבודות שבוצעו:'), bulletize(e.work)); }
   if (e.notes && e.notes.trim()) { L.push('', B('הערות:'), bulletize(e.notes)); }
-  L.push('', `— BMB · Ben Menachem Bari${s.company ? ` · ${s.company}` : ''}`);
+  L.push('', '— BMB · Ben Menachem Bari');
   return L.join('\n');
 }
 
@@ -104,7 +136,7 @@ function toast(msg) {
 function showView(name) {
   $$('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${name}`));
   $$('.tabbar button').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
-  if (name === 'history') renderHistory();
+  if (name === 'history') { renderHistory(); renderExportUI(); }
   if (name === 'chat') { renderChat(); setTimeout(scrollChat, 30); }
   if (name === 'settings') renderSettings();
   if (name !== 'chat') window.scrollTo({ top: 0 });
@@ -114,6 +146,7 @@ function showView(name) {
 function readForm() {
   current.date = $('#f-date').value || current.date;
   current.site = $('#f-site').value.trim();
+  current.company = $('#f-company').value.trim();
   current.start = $('#f-start').value;
   current.end = $('#f-end').value;
   current.weather = $('#f-weather').value.trim();
@@ -126,6 +159,7 @@ function fillForm(e) {
   $('#f-date').value = e.date;
   $('#weekday').textContent = weekday(e.date);
   $('#f-site').value = e.site || '';
+  $('#f-company').value = e.company || '';
   $('#f-start').value = e.start || '';
   $('#f-end').value = e.end || '';
   $('#f-weather').value = e.weather || '';
@@ -159,6 +193,8 @@ function syncChips() {
 function fillSites() {
   const sites = [...new Set(Object.values(store.entries()).sort((a, b) => b.date.localeCompare(a.date)).map((e) => e.site).filter(Boolean))];
   $('#sitesList').innerHTML = sites.map((s) => `<option value="${esc(s)}">`).join('');
+  const cos = [...new Set([store.settings().company, ...Object.values(store.entries()).map((e) => e.company)].filter(Boolean))];
+  $('#companiesList').innerHTML = cos.map((s) => `<option value="${esc(s)}">`).join('');
 }
 
 function lastEntry() {
@@ -182,7 +218,7 @@ function loadDate(date) {
   if (saved) current = JSON.parse(JSON.stringify(saved));
   else {
     current = blankEntry(date);
-    const last = lastEntry(); if (last && last.site) current.site = last.site; // convenience: same site as last time
+    const last = lastEntry(); if (last && last.site) { current.site = last.site; if (last.company) current.company = last.company; } // convenience: same site as last time
   }
   current.crew = current.crew || [];
   dirty = false; fillForm(current); updateStatus();
@@ -243,11 +279,12 @@ function buildPrint(e) {
   $('#printArea').innerHTML = `
     <div class="p-head">
       <div class="p-brand"><svg viewBox="0 0 100 100"><use href="#bmb-logo"/></svg>
-        <div><b>יומן עבודה</b><small dir="ltr">Ben Menachem Bari${s.company ? ' · ' + esc(s.company) : ''}</small></div></div>
+        <div><b>יומן עבודה</b><small dir="ltr">Ben Menachem Bari</small></div></div>
+      ${companyLogo.get() ? `<img class="p-co" src="${companyLogo.get().dataUrl}" alt="">` : ''}
       <div class="p-date">${weekday(e.date)}<br>${fmtDate(e.date)}</div>
     </div>
     <table class="p-meta">
-      ${row('אתר', e.site)}${row('מנהל עבודה', s.foreman)}
+      ${row('אתר', e.site)}${row('חברת בנייה', e.company || s.company)}${row('מנהל עבודה', s.foreman)}
       ${e.start || e.end ? row('שעות עבודה', `${e.start || '?'}–${e.end || '?'}${m != null ? ` (${hoursText(m)})` : ''}`) : ''}
       ${row('מזג אוויר', e.weather)}
     </table>
@@ -512,8 +549,62 @@ function renderSettings() {
   $('#model').value = s.model || DEFAULT_MODEL;
   $('#foreman').value = s.foreman || '';
   $('#company').value = s.company || '';
+  renderLogoPreview();
   $('#keyStatus').textContent = s.apiKey ? `✓ מפתח שמור במכשיר (…${s.apiKey.slice(-4)})` : 'לא הוגדר מפתח';
   $('#ver').textContent = APP_VERSION;
+}
+
+function renderLogoPreview() {
+  const l = companyLogo.get();
+  $('#logoPreview').innerHTML = l ? `<img src="${l.dataUrl}" alt="לוגו החברה">` : '<span>אין לוגו</span>';
+}
+
+/* ---------------- excel export ---------------- */
+let lastExport = null;
+function rangeDates(kind) {
+  const t = todayISO(), d = parseISO(t);
+  if (kind === 'week') { const sun = addDays(t, -d.getDay()); return [sun, addDays(sun, 6)]; } // Israeli week: Sunday–Saturday
+  if (kind === 'month') return [isoOf(new Date(d.getFullYear(), d.getMonth(), 1)), isoOf(new Date(d.getFullYear(), d.getMonth() + 1, 0))];
+  if (kind === 'lastmonth') return [isoOf(new Date(d.getFullYear(), d.getMonth() - 1, 1)), isoOf(new Date(d.getFullYear(), d.getMonth(), 0))];
+  if (kind === 'custom') return [$('#xFrom').value || '0000-01-01', $('#xTo').value || '9999-12-31'];
+  return ['0000-01-01', '9999-12-31'];
+}
+function rangeEntries() {
+  const kind = ($('#rangeChips .chip.on') || {}).dataset?.r || 'week';
+  const [from, to] = rangeDates(kind); const site = $('#xSite').value;
+  return Object.values(store.entries()).filter((e) => e.date >= from && e.date <= to && (!site || e.site === site) && hasContent(e))
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+function renderExportUI() {
+  const sel = $('#xSite'), cur = sel.value;
+  const sites = [...new Set(Object.values(store.entries()).map((e) => e.site).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'he'));
+  sel.innerHTML = '<option value="">כל האתרים</option>' + sites.map((x) => `<option ${x === cur ? 'selected' : ''}>${esc(x)}</option>`).join('');
+  const kind = ($('#rangeChips .chip.on') || {}).dataset?.r;
+  $('#customRange').hidden = kind !== 'custom';
+  const list = rangeEntries();
+  const [from, to] = rangeDates(kind);
+  const label = kind === 'all' || kind === 'custom' && (!$('#xFrom').value || !$('#xTo').value) ? '' : ` (${fmtDate(from)} – ${fmtDate(to)})`;
+  $('#xCount').textContent = list.length ? `נמצאו ${list.length} ימים${label}` : `אין ימים שמורים בטווח הזה${label}`;
+  $('#xlsxRangeBtn').disabled = !list.length;
+}
+async function runExport(entries, opts) {
+  if (!entries.length) return toast('אין נתונים לייצוא');
+  $('#busy').hidden = false;
+  try {
+    lastExport = await buildWorkbook(entries, opts);
+    $('#xSheetName').textContent = lastExport.filename;
+    $('#xSheetInfo').textContent = `${lastExport.stats.days} ימים · ${lastExport.stats.contractors} קבלנים/פריטים · ${Math.ceil(lastExport.blob.size / 1024)} KB`;
+    const file = new File([lastExport.blob], lastExport.filename, { type: lastExport.blob.type });
+    $('#xSheetShare').hidden = !(navigator.canShare && navigator.canShare({ files: [file] }));
+    $('#xSheet').hidden = false;
+  } catch (e) { console.error(e); alert('שגיאה ביצירת קובץ האקסל: ' + (e.message || e)); }
+  finally { $('#busy').hidden = true; }
+}
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = filename; a.rel = 'noopener';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
 /* ---------------- wire up ---------------- */
@@ -613,7 +704,43 @@ function init() {
       $('#keyStatus').textContent = `✓ החיבור תקין (מודל: ${r.model})`;
     } catch (e) { $('#keyStatus').textContent = '✗ ' + e.message; }
   });
-  $('#saveProfile').addEventListener('click', () => { store.saveSettings({ foreman: $('#foreman').value.trim(), company: $('#company').value.trim() }); toast('הפרטים נשמרו ✓'); });
+  $('#saveProfile').addEventListener('click', () => { store.saveSettings({ foreman: $('#foreman').value.trim() }); toast('הפרטים נשמרו ✓'); });
+
+  // company settings
+  $('#logoFile').addEventListener('change', async (e) => {
+    const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+    try { const r = await resizeImage(f); companyLogo.set(r); renderLogoPreview(); toast('הלוגו נשמר ✓'); }
+    catch (err) { alert(err.name === 'QuotaExceededError' ? 'התמונה גדולה מדי לשמירה במכשיר' : (err.message || 'שגיאה בטעינת התמונה')); }
+  });
+  $('#logoClear').addEventListener('click', () => { if (companyLogo.get() && confirm('להסיר את לוגו החברה?')) { companyLogo.clear(); renderLogoPreview(); toast('הלוגו הוסר'); } });
+  $('#saveCompany').addEventListener('click', () => {
+    const name = $('#company').value.trim(); store.saveSettings({ company: name });
+    if (name && !$('#f-company').value) { $('#f-company').value = name; markDirty(); }
+    fillSites(); toast('פרטי החברה נשמרו ✓');
+  });
+
+  // excel export
+  $('#xlsxDayBtn').addEventListener('click', () => {
+    readForm(); if (!hasContent(current)) return toast('היומן של היום ריק');
+    saveCurrent(true); runExport([JSON.parse(JSON.stringify(current))]);
+  });
+  $('#rangeChips').addEventListener('click', (e) => {
+    const c = e.target.closest('.chip'); if (!c) return;
+    $$('#rangeChips .chip').forEach((x) => x.classList.toggle('on', x === c));
+    if (c.dataset.r === 'custom' && !$('#xFrom').value) { const [a, b] = rangeDates('month'); $('#xFrom').value = a; $('#xTo').value = b; }
+    renderExportUI();
+  });
+  ['#xFrom', '#xTo', '#xSite'].forEach((id) => $(id).addEventListener('change', renderExportUI));
+  $('#xlsxRangeBtn').addEventListener('click', () => runExport(rangeEntries(), { siteLabel: $('#xSite').value || undefined }));
+  $('#xSheetDownload').addEventListener('click', () => { if (lastExport) downloadBlob(lastExport.blob, lastExport.filename); });
+  $('#xSheetShare').addEventListener('click', async () => {
+    if (!lastExport) return;
+    const file = new File([lastExport.blob], lastExport.filename, { type: lastExport.blob.type });
+    try { await navigator.share({ files: [file], title: lastExport.filename }); }
+    catch (e) { if (e.name !== 'AbortError') downloadBlob(lastExport.blob, lastExport.filename); }
+  });
+  $('#xSheetClose').addEventListener('click', () => { $('#xSheet').hidden = true; });
+  $('#xSheet').addEventListener('click', (e) => { if (e.target.id === 'xSheet') $('#xSheet').hidden = true; });
 
   // network status
   const net = () => { $('#netStatus').classList.toggle('off', !navigator.onLine); $('#netStatus').title = navigator.onLine ? 'מחובר' : 'אופליין'; };
@@ -623,7 +750,13 @@ function init() {
   renderSettings();
 
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
+    const hadController = !!navigator.serviceWorker.controller;
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController || reloaded) return; // first install: nothing to refresh
+      reloaded = true; if (dirty) saveCurrent(true); location.reload();
+    });
+    navigator.serviceWorker.register('sw.js').then((r) => r.update()).catch(() => {});
   }
 }
 
