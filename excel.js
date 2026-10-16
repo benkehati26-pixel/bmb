@@ -137,7 +137,7 @@ async function buildWorkbook(entries, opts = {}) {
     company: companies.length === 1 ? companies[0] : (s.company || companies.join(', ')),
     site: sites.length <= 3 ? sites.join(', ') : `${sites.length} אתרים`,
     range: from === to ? `${weekday(from)} ${fmtDate(from)}` : `${fmtDate(from)} – ${fmtDate(to)}`,
-    foreman: s.foreman,
+    foreman: opts.foreman || s.foreman,
     generated: `${fmtDate(todayISO())} ${new Date().toTimeString().slice(0, 5)}`,
   };
 

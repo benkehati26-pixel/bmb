@@ -1,43 +1,261 @@
 /* BMB · יומן עבודה – Ben Menachem Bari
- * Static, offline-first PWA. All data lives in this device's localStorage.
- * SECURITY: no API key is embedded anywhere. The user enters their own Anthropic key in Settings;
- * it is stored only in localStorage on their device and sent only to api.anthropic.com.
+ * Offline-first PWA backed by Supabase (Auth + Postgres with RLS + Edge Functions).
+ * SECURITY: the only key in this file is the PUBLIC Supabase publishable key (safe to expose; RLS protects data).
+ * The Gemini key and the service_role key live only as Supabase Edge Function secrets.
  */
 'use strict';
 
-const APP_VERSION = '1.1.0';
-const LS_LOGO = 'bmb.companyLogo.v1';
-const LS_ENTRIES = 'bmb.entries.v1';
-const LS_SETTINGS = 'bmb.settings.v1';
-const LS_CHAT = 'bmb.chat.v1';
-const API_URL = 'https://api.anthropic.com/v1/messages';
-const DEFAULT_MODEL = 'claude-sonnet-5-5';
-const FALLBACK_MODELS = ['claude-sonnet-5-5', 'claude-sonnet-4-6', 'claude-sonnet-4-5-20250929'];
+const APP_VERSION = '1.2.0';
+const SB_URL = 'https://ufgmhbtimmgumeufwfxq.supabase.co';
+const SB_KEY = 'sb_publishable_PHuOoNjPXQ8kEhXzGEKvhA_MGpInny-'; // public publishable key
+const USER_DOMAIN = 'bmb.local';
+const LS_LEGACY_ENTRIES = 'bmb.entries.v1'; // v1.1 (pre-login) data – offered for one-time upload
+const LS_LEGACY_LOGO = 'bmb.companyLogo.v1';
+const LS_SETTINGS = 'bmb.settings.v1';      // per-device personal prefs (foreman name)
+const LS_COMPANY = 'bmb.company.v2';        // cache of server app_settings
+const LS_PROFILE = 'bmb.profile.v2';        // cache of last signed-in profile (offline start)
+const LS_AUTH = 'bmb.auth';                 // supabase-js session storage key
+const AI_LIMIT_DEFAULT = 50;
 const CREW_TYPES = ['פועלים', 'קבלן משנה', 'ציוד', 'אחר'];
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const jget = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k)); return v ?? d; } catch { return d; } };
+const jset = (k, v) => localStorage.setItem(k, JSON.stringify(v));
 
-/* ---------------- storage ---------------- */
+const sb = window.supabase.createClient(SB_URL, SB_KEY, {
+  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false, storageKey: LS_AUTH },
+});
+
+/* ---------------- session state ---------------- */
+let me = null;          // { id, username, display_name, role, ai_enabled, disabled }
+const uid = () => me && me.id;
+const isAdmin = () => !!me && me.role === 'admin';
+const ukey = (k) => `bmb.u.${uid()}.${k}`;
+
+/* ---------------- storage (per-user local cache + pending queue) ---------------- */
 const store = {
-  entries() { try { return JSON.parse(localStorage.getItem(LS_ENTRIES)) || {}; } catch { return {}; } },
-  saveAll(obj) { localStorage.setItem(LS_ENTRIES, JSON.stringify(obj)); },
+  entries() { return uid() ? jget(ukey('entries'), {}) : {}; },
+  saveAll(obj) { if (uid()) jset(ukey('entries'), obj); },
   get(date) { return this.entries()[date] || null; },
-  put(entry) { const all = this.entries(); all[entry.date] = entry; this.saveAll(all); },
-  del(date) { const all = this.entries(); delete all[date]; this.saveAll(all); },
+  put(entry) { const all = this.entries(); all[entry.date] = entry; this.saveAll(all); pending.mark(entry.date, 'put'); },
+  putMany(list) { const all = this.entries(); list.forEach((e) => { all[e.date] = e; }); this.saveAll(all); list.forEach((e) => pending.mark(e.date, 'put')); },
+  del(date) { const all = this.entries(); delete all[date]; this.saveAll(all); pending.mark(date, 'del'); },
   settings() {
-    const def = { apiKey: '', model: DEFAULT_MODEL, foreman: 'בן מנחם בארי', company: '' };
-    try { return Object.assign(def, JSON.parse(localStorage.getItem(LS_SETTINGS)) || {}); } catch { return def; }
+    const local = jget(LS_SETTINGS, {});
+    return { foreman: local.foreman ?? (me && me.display_name) ?? '', company: company.get().company_name || '' };
   },
-  saveSettings(patch) { localStorage.setItem(LS_SETTINGS, JSON.stringify(Object.assign(this.settings(), patch))); },
+  saveSettings(patch) { const cur = jget(LS_SETTINGS, {}); jset(LS_SETTINGS, Object.assign(cur, { foreman: patch.foreman ?? cur.foreman })); },
 };
 
-const companyLogo = {
-  get() { try { return JSON.parse(localStorage.getItem(LS_LOGO)) || null; } catch { return null; } },
-  set(v) { localStorage.setItem(LS_LOGO, JSON.stringify(v)); },
-  clear() { localStorage.removeItem(LS_LOGO); },
+const pending = {
+  all() { return uid() ? jget(ukey('pending'), {}) : {}; },
+  count() { return Object.keys(this.all()).length; },
+  mark(date, op) { const p = this.all(); p[date] = { op, t: Date.now() }; jset(ukey('pending'), p); scheduleSync(); updateSyncBadge(); },
+  clear(date, t) { const p = this.all(); if (p[date] && p[date].t === t) { delete p[date]; jset(ukey('pending'), p); } },
 };
+
+/** Company settings (name + logo) – stored server-side in app_settings (admin-only write), cached locally. */
+const company = {
+  get() { return jget(LS_COMPANY, { company_name: '', logo: null }); },
+  set(v) { jset(LS_COMPANY, v); },
+};
+const companyLogo = { get() { return company.get().logo || null; } }; // used by excel.js / print
+
+// Remove the old per-device Anthropic key (v1.1) – AI now runs server-side.
+(() => { const s = jget(LS_SETTINGS, null); if (s && ('apiKey' in s || 'model' in s)) { delete s.apiKey; delete s.model; jset(LS_SETTINGS, s); } })();
+
+/* ---------------- sync ---------------- */
+let syncing = false, syncTimer = null, syncState = 'idle', lastSyncAt = null;
+function scheduleSync(ms = 1200) { clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, ms); }
+const entryData = (e) => ({ site: e.site || '', company: e.company || '', start: e.start || '', end: e.end || '', weather: e.weather || '', crew: e.crew || [], work: e.work || '', notes: e.notes || '' });
+const rowToEntry = (r) => Object.assign({ date: r.date, site: '', company: '', start: '', end: '', weather: '', crew: [], work: '', notes: '' }, r.data || {}, { date: r.date, updatedAt: r.updated_at });
+
+async function syncNow() {
+  if (!uid() || syncing) return;
+  if (!navigator.onLine) { syncState = 'offline'; updateSyncBadge(); return; }
+  syncing = true; syncState = 'syncing'; updateSyncBadge();
+  const myId = uid();
+  try {
+    // 1) push local changes
+    const p = pending.all(), all = store.entries();
+    for (const [date, { op, t }] of Object.entries(p)) {
+      if (op === 'del') {
+        const { error } = await sb.from('logs').delete().eq('user_id', myId).eq('date', date);
+        if (error) throw error;
+      } else if (all[date]) {
+        const e = all[date];
+        const { error } = await sb.from('logs').upsert({ user_id: myId, date, data: entryData(e), updated_at: e.updatedAt || new Date().toISOString() }, { onConflict: 'user_id,date' });
+        if (error) throw error;
+      }
+      if (uid() !== myId) return;
+      pending.clear(date, t);
+    }
+    // 2) pull server state (server wins for anything not pending locally)
+    const { data, error } = await sb.from('logs').select('date,data,updated_at').eq('user_id', myId);
+    if (error) throw error;
+    if (uid() !== myId) return;
+    const still = pending.all(), local = store.entries(), next = {};
+    data.forEach((r) => { next[r.date] = rowToEntry(r); });
+    Object.keys(still).forEach((d) => { if (local[d]) next[d] = local[d]; else delete next[d]; });
+    store.saveAll(next);
+    // 3) company settings + my profile
+    await Promise.all([pullCompany(), refreshProfile()]);
+    syncState = pending.count() ? 'pending' : 'ok'; lastSyncAt = new Date();
+    afterSyncRefresh();
+  } catch (e) {
+    console.warn('sync failed', e);
+    syncState = /JWT|auth|401/i.test(e.message || '') ? 'auth' : 'error';
+  } finally { syncing = false; updateSyncBadge(); if (pending.count() && syncState === 'ok') scheduleSync(); }
+}
+
+async function pullCompany() {
+  const { data, error } = await sb.from('app_settings').select('company_name,logo,updated_at').eq('id', 1).maybeSingle();
+  if (!error && data) company.set({ company_name: data.company_name || '', logo: data.logo || null, updated_at: data.updated_at });
+}
+async function refreshProfile() {
+  const { data, error } = await sb.from('profiles').select('id,username,display_name,role,ai_enabled,disabled').eq('id', uid()).single();
+  if (error || !data) return;
+  if (data.disabled) { toast('המשתמש הושבת ע״י המנהל'); return logout(true); }
+  me = data; jset(LS_PROFILE, me); applyRoleUI();
+}
+function afterSyncRefresh() {
+  if (!dirty) {
+    const s = store.get(current.date);
+    if (s && JSON.stringify(entryData(s)) !== JSON.stringify(entryData(current))) { current = JSON.parse(JSON.stringify(s)); current.crew = current.crew || []; fillForm(current); }
+    updateStatus();
+  }
+  if ($('#view-history').classList.contains('active') && histUser === 'me') { renderHistory(); renderExportUI(); }
+  if ($('#view-settings').classList.contains('active')) renderSettings();
+}
+function updateSyncBadge() {
+  const el = $('#syncStatus'); if (!el) return;
+  const n = pending.count();
+  const map = {
+    syncing: ['🔄 מסנכרן…', ''], offline: [`📴 אופליין${n ? ` · ${n} ממתינים לסנכרון` : ''}`, 'warn'],
+    error: [`⚠️ הסנכרון נכשל${n ? ` · ${n} ממתינים` : ''}`, 'warn'], auth: ['⚠️ יש להתחבר מחדש לסנכרון', 'warn'],
+    pending: [`⏳ ${n} ממתינים לסנכרון`, 'warn'], ok: ['☁️ מסונכרן', 'ok'], idle: ['', ''],
+  };
+  let [txt, cls] = map[syncState] || map.idle;
+  if (syncState === 'ok' && n) [txt, cls] = map.pending;
+  el.textContent = txt; el.className = `sync ${cls}`;
+}
+
+/* ---------------- auth ---------------- */
+async function resolveEmail(login) {
+  const v = login.trim().toLowerCase();
+  if (v.includes('@')) return v;
+  const { data, error } = await sb.rpc('login_email', { p_username: v });
+  if (error) throw error;
+  return data || `${v}@${USER_DOMAIN}`;
+}
+
+async function doLogin(ev) {
+  ev && ev.preventDefault();
+  const u = $('#loginUser').value.trim(), p = $('#loginPass').value;
+  const err = $('#loginErr'); err.textContent = '';
+  if (!u || !p) { err.textContent = 'נא למלא שם משתמש וסיסמה'; return; }
+  if (!navigator.onLine) { err.textContent = 'אין חיבור לאינטרנט – הכניסה הראשונה דורשת חיבור.'; return; }
+  const btn = $('#loginBtn'); btn.disabled = true; btn.textContent = 'מתחבר…';
+  try {
+    const email = await resolveEmail(u);
+    const { data, error } = await sb.auth.signInWithPassword({ email, password: p });
+    if (error) throw error;
+    $('#loginPass').value = '';
+    await enterApp(data.user);
+  } catch (e) {
+    const m = String(e.message || e);
+    err.textContent = /invalid login|invalid_credentials/i.test(m) ? 'שם משתמש או סיסמה שגויים'
+      : /banned/i.test(m) ? 'המשתמש מושבת. פנה למנהל.'
+      : /fetch|network/i.test(m) ? 'שגיאת רשת – בדוק את החיבור ונסה שוב.' : 'שגיאה בהתחברות: ' + m;
+  } finally { btn.disabled = false; btn.textContent = 'כניסה'; }
+}
+
+function showLogin() {
+  document.body.classList.add('auth-out'); document.body.classList.remove('auth-in', 'is-admin', 'booting');
+  $('#loginScreen').hidden = false; $('#loginVer').textContent = APP_VERSION;
+  setTimeout(() => $('#loginUser').focus(), 50);
+}
+
+async function enterApp(user, offline = false) {
+  let prof = null;
+  if (!offline) {
+    const { data, error } = await sb.from('profiles').select('id,username,display_name,role,ai_enabled,disabled').eq('id', user.id).single();
+    if (!error) prof = data;
+    else { const c = jget(LS_PROFILE, null); if (c && c.id === user.id) prof = c; }
+  } else { const c = jget(LS_PROFILE, null); if (c && c.id === user.id) prof = c; }
+  if (!prof) { await sb.auth.signOut().catch(() => {}); showLogin(); $('#loginErr').textContent = 'לא נמצא פרופיל למשתמש. פנה למנהל.'; return; }
+  if (prof.disabled) { await sb.auth.signOut().catch(() => {}); showLogin(); $('#loginErr').textContent = 'המשתמש מושבת. פנה למנהל.'; return; }
+  me = prof; jset(LS_PROFILE, me);
+  document.body.classList.remove('auth-out', 'booting'); document.body.classList.add('auth-in');
+  $('#loginScreen').hidden = true;
+  applyRoleUI();
+  chat = loadChat(); histUser = 'me';
+  dirty = false; current = blankEntry(todayISO());
+  loadDate(todayISO()); showView('log');
+  syncState = offline ? 'offline' : 'idle'; updateSyncBadge();
+  if (!offline) { await pullCompany().catch(() => {}); await syncNow(); offerMigration(); }
+}
+
+function applyRoleUI() {
+  document.body.classList.toggle('is-admin', isAdmin());
+  $('#whoName').textContent = me ? (me.display_name || me.username) : '';
+  $('#whoRole').textContent = isAdmin() ? 'מנהל' : '';
+}
+
+async function logout(force = false) {
+  const n = pending.count();
+  if (!force && n && !confirm(`יש ${n} ימים שעדיין לא סונכרנו לשרת. אם תתנתק עכשיו הם יישארו רק במכשיר. להתנתק בכל זאת?`)) return;
+  if (dirty) saveCurrent(true);
+  if (!pending.count()) { localStorage.removeItem(ukey('entries')); localStorage.removeItem(ukey('chat')); } // shared-device hygiene
+  await sb.auth.signOut().catch(() => {});
+  localStorage.removeItem(LS_AUTH);
+  me = null; chat = []; showLogin();
+}
+
+async function boot() {
+  const { data } = await sb.auth.getSession().catch(() => ({ data: {} }));
+  if (data && data.session) return enterApp(data.session.user, !navigator.onLine);
+  // Offline start with an expired access token: keep working from the local cache until we're online again.
+  const raw = jget(LS_AUTH, null), cached = jget(LS_PROFILE, null);
+  const u = raw && (raw.user || (raw.currentSession && raw.currentSession.user));
+  if (!navigator.onLine && u && cached && cached.id === u.id) return enterApp(u, true);
+  showLogin();
+}
+
+/* ---------------- one-time migration of v1.1 local data ---------------- */
+function offerMigration() {
+  const legacy = jget(LS_LEGACY_ENTRIES, null);
+  const flag = `bmb.migrated.${uid()}`;
+  if (!legacy || localStorage.getItem(flag)) return;
+  const list = Object.values(legacy).filter((e) => e && validISO(e.date));
+  if (!list.length) return;
+  $('#migCount').textContent = list.length;
+  $('#migSheet').hidden = false;
+}
+async function runMigration(upload) {
+  $('#migSheet').hidden = true;
+  localStorage.setItem(`bmb.migrated.${uid()}`, new Date().toISOString());
+  if (!upload) return toast('אפשר להעלות מאוחר יותר דרך ייבוא JSON');
+  const legacy = jget(LS_LEGACY_ENTRIES, {});
+  const mine = store.entries();
+  const list = Object.values(legacy).filter((e) => e && validISO(e.date)).map((e) => Object.assign(blankEntry(e.date), e, { crew: Array.isArray(e.crew) ? e.crew : [] }))
+    .filter((e) => !mine[e.date] || (e.updatedAt || '') > (mine[e.date].updatedAt || ''));
+  store.putMany(list);
+  localStorage.setItem(LS_LEGACY_ENTRIES + '.migrated', localStorage.getItem(LS_LEGACY_ENTRIES)); localStorage.removeItem(LS_LEGACY_ENTRIES);
+  // admin: also carry over the old per-device company name/logo if the server has none yet
+  if (isAdmin()) {
+    const oldS = jget(LS_SETTINGS, {}), oldLogo = jget(LS_LEGACY_LOGO, null), c = company.get();
+    const patch = {};
+    if (!c.company_name && oldS.company) patch.company_name = oldS.company;
+    if (!c.logo && oldLogo) patch.logo = oldLogo;
+    if (Object.keys(patch).length) await saveCompanyRemote(patch).catch(() => {});
+  }
+  await syncNow();
+  loadDate(current.date);
+  toast(`${list.length} ימים הועלו לחשבון ✓`);
+}
 
 /** Resize an image file to fit maxW×maxH, returns {dataUrl,w,h}. PNG keeps transparency; falls back to JPEG if large. */
 function resizeImage(file, maxW = 480, maxH = 240) {
@@ -130,16 +348,6 @@ let toastTimer;
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.classList.add('show');
   clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2400);
-}
-
-/* ---------------- views ---------------- */
-function showView(name) {
-  $$('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${name}`));
-  $$('.tabbar button').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
-  if (name === 'history') { renderHistory(); renderExportUI(); }
-  if (name === 'chat') { renderChat(); setTimeout(scrollChat, 30); }
-  if (name === 'settings') renderSettings();
-  if (name !== 'chat') window.scrollTo({ top: 0 });
 }
 
 /* ---------------- log form ---------------- */
@@ -296,33 +504,7 @@ function buildPrint(e) {
 }
 function printLog() { readForm(); saveCurrent(true); buildPrint(current); setTimeout(() => window.print(), 50); }
 
-/* ---------------- history ---------------- */
-function renderHistory() {
-  const q = ($('#histSearch').value || '').trim();
-  const list = Object.values(store.entries()).sort((a, b) => b.date.localeCompare(a.date))
-    .filter((e) => !q || JSON.stringify(e).includes(q));
-  const box = $('#histList');
-  if (!list.length) {
-    box.innerHTML = `<div class="empty card"><svg viewBox="0 0 100 100"><use href="#bmb-logo"/></svg><div>${q ? 'לא נמצאו תוצאות' : 'עדיין אין ימים שמורים.<br>מלא את היומן של היום והוא יופיע כאן.'}</div></div>`;
-    return;
-  }
-  box.innerHTML = list.map((e) => {
-    const m = minutesBetween(e.start, e.end);
-    const crewN = (e.crew || []).filter((c) => c.type === 'פועלים' || c.type === 'קבלן משנה').reduce((a, c) => a + (Number(c.count) || 0), 0);
-    const equip = (e.crew || []).filter((c) => c.type === 'ציוד').map((c) => c.name).join(', ');
-    const sum = [crewN ? `${crewN} עובדים` : '', equip, (e.work || '').replace(/[•\n]+/g, ' ').trim()].filter(Boolean).join(' · ');
-    return `<div class="hist-item ${e.date === todayISO() ? 'is-today' : ''}" data-date="${e.date}">
-      <div class="hist-top"><span class="hist-date">${weekday(e.date)}, ${fmtDate(e.date)}</span><span class="hist-hours">${m != null ? '⏰ ' + fmtDur(m) : ''}</span></div>
-      <div class="hist-site">${esc(e.site || 'ללא שם אתר')}</div>
-      <div class="hist-sum">${esc(sum || '—')}</div>
-      <div class="hist-actions">
-        <button class="btn primary" data-act="open">✏️ פתח / ערוך</button>
-        <button class="btn" data-act="wa">📤 שלח</button>
-        <button class="btn danger-ghost" data-act="del">🗑️</button>
-      </div></div>`;
-  }).join('');
-}
-
+/* ---------------- history: see renderHistory below ---------------- */
 function exportJSON() {
   const data = { app: 'bmb-work-log', version: APP_VERSION, exportedAt: new Date().toISOString(), entries: store.entries() };
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -348,57 +530,92 @@ function importJSON(file) {
       const all = store.entries();
       const overlap = valid.filter((e) => all[e.date]).length;
       if (overlap && !confirm(`${overlap} ימים כבר קיימים במכשיר. לדרוס אותם עם הגיבוי?`)) return;
-      valid.forEach((e) => { all[e.date] = Object.assign(blankEntry(e.date), e, { crew: Array.isArray(e.crew) ? e.crew : [] }); });
-      store.saveAll(all); renderHistory(); loadDate(current.date);
+      store.putMany(valid.map((e) => Object.assign(blankEntry(e.date), e, { crew: Array.isArray(e.crew) ? e.crew : [] })));
+      renderHistory(); loadDate(current.date);
       toast(`יובאו ${valid.length} ימים ✓`);
     } catch { alert('הקובץ לא תקין – יש לבחור קובץ גיבוי JSON של האפליקציה.'); }
   };
   r.readAsText(file);
 }
 
-/* ---------------- AI chat ---------------- */
-const SYSTEM_PROMPT = `You are the assistant of an Israeli construction site foreman (מנהל עבודה), Ben Menachem Bari.
-He writes short, informal Hebrew notes about his work day (sometimes with typos or slang). Your job: turn them into a professional, clear daily site work log (יומן עבודה) in Hebrew, as written on Israeli construction sites.
+/* ---------------- history (own logs, or – for admin – any user's logs, read-only) ---------------- */
+let histUser = 'me';     // 'me' | '<user id>' | 'all'
+let remoteList = [];     // entries fetched for admin views: {..entry, _owner, _key}
+let usersCache = [];     // admin: list from admin-users edge function
 
-Respond with ONLY one JSON object – no markdown, no code fences, no text before or after – in exactly this shape:
-{
-  "reply": "short friendly Hebrew message to the foreman (1-2 sentences): what you understood; ask a short question only if something important is unclear",
-  "log": {
-    "date": "YYYY-MM-DD",
-    "site": "string",
-    "start": "HH:MM or empty string",
-    "end": "HH:MM or empty string",
-    "weather": "string or empty",
-    "crew": [{"type": "פועלים" | "קבלן משנה" | "ציוד" | "אחר", "name": "string", "count": 1}],
-    "work": "string",
-    "notes": "string"
-  }
+function histSource() {
+  if (histUser === 'me') return Object.values(store.entries()).map((e) => ({ ...e, _key: e.date }));
+  return remoteList;
+}
+async function loadRemoteLogs() {
+  if (!navigator.onLine) { remoteList = []; toast('צפייה ביומנים של משתמשים אחרים דורשת חיבור'); return; }
+  let q = sb.from('logs').select('id,user_id,date,data,updated_at').order('date', { ascending: false }).limit(2000);
+  if (histUser !== 'all') q = q.eq('user_id', histUser);
+  const { data, error } = await q;
+  if (error) { toast('שגיאה בטעינת יומנים'); remoteList = []; return; }
+  const names = Object.fromEntries(usersCache.map((u) => [u.id, u.display_name || u.username]));
+  remoteList = data.map((r) => ({ ...rowToEntry(r), _owner: names[r.user_id] || (r.user_id === uid() ? (me.display_name || me.username) : 'משתמש'), _uid: r.user_id, _key: r.id }));
+}
+async function renderHistUserPicker() {
+  if (!isAdmin()) return;
+  if (!usersCache.length && navigator.onLine) await loadUsers(true).catch(() => {});
+  const sel = $('#histUser');
+  sel.innerHTML = `<option value="me">היומנים שלי</option>` +
+    usersCache.filter((u) => u.id !== uid()).map((u) => `<option value="${u.id}">${esc(u.display_name || u.username)} (${esc(u.username)})</option>`).join('') +
+    `<option value="all">כל המשתמשים</option>`;
+  sel.value = histUser;
 }
 
-Rules:
-- "log" is ALWAYS the COMPLETE updated log: start from the current form contents given in the context, merge everything the foreman said in this conversation, and apply his corrections. Keep existing values he did not change. Never drop existing crew rows or work lines unless he asks.
-- "work": professional construction Hebrew, one item per line, each line starting with "• " and ending with a period (e.g. "• יציקת כלונסאות מס' 12–15."). Use correct professional terms (חפירה, מילוי והידוק, כלונסאות, ראשי כלונסאות, זיון, טפסנות, יציקה, קורות יסוד, רפסודה, תקרה, בלוקים, טיח, איטום וכו'). Do not invent work that was not mentioned.
-- "crew": a team of workers → type "פועלים", name = whose team (e.g. "צוות מאג'ד"), count = number of workers. A subcontractor → "קבלן משנה" (name = trade/company, count = number of workers if known, else 1). Machines/equipment (מחפר, באגר, מיני מחפרון, בובקט, מנוף, משאבת בטון, מקדחה, משאית) → "ציוד", count = number of units.
-- Times in 24h: "7 עד 16" → start "07:00", end "16:00"; "עד 4" in a work-day context means 16:00.
-- "date": the date given in the context unless he says otherwise ("אתמול" → previous day).
-- "notes": safety issues, delays, deliveries/supplies, instructions, visits (מפקח, יועץ, קונסטרוקטור), problems. Professional phrasing.
-- Never invent facts, names, numbers or times. Unknown fields stay as in the current form (or "").
-- Hebrew only in values (except proper names/numbers).`;
+function renderHistory() {
+  const q = ($('#histSearch').value || '').trim();
+  const ro = histUser !== 'me';
+  const list = histSource().sort((a, b) => b.date.localeCompare(a.date) || String(a._owner || '').localeCompare(String(b._owner || '')))
+    .filter((e) => !q || JSON.stringify(e).includes(q));
+  const box = $('#histList');
+  $('#backupCard').hidden = ro;
+  if (!list.length) {
+    box.innerHTML = `<div class="empty card"><svg viewBox="0 0 100 100"><use href="#bmb-logo"/></svg><div>${q ? 'לא נמצאו תוצאות' : ro ? 'אין יומנים למשתמש הזה' : 'עדיין אין ימים שמורים.<br>מלא את היומן של היום והוא יופיע כאן.'}</div></div>`;
+    return;
+  }
+  const pend = pending.all();
+  box.innerHTML = list.map((e) => {
+    const m = minutesBetween(e.start, e.end);
+    const crewN = (e.crew || []).filter((c) => c.type === 'פועלים' || c.type === 'קבלן משנה').reduce((a, c) => a + (Number(c.count) || 0), 0);
+    const equip = (e.crew || []).filter((c) => c.type === 'ציוד').map((c) => c.name).join(', ');
+    const sum = [crewN ? `${crewN} עובדים` : '', equip, (e.work || '').replace(/[•\n]+/g, ' ').trim()].filter(Boolean).join(' · ');
+    return `<div class="hist-item ${e.date === todayISO() ? 'is-today' : ''}" data-key="${esc(e._key)}">
+      <div class="hist-top"><span class="hist-date">${weekday(e.date)}, ${fmtDate(e.date)}</span><span class="hist-hours">${!ro && pend[e.date] ? '<span title="ממתין לסנכרון">⏳</span> ' : ''}${m != null ? '⏰ ' + fmtDur(m) : ''}</span></div>
+      ${ro ? `<div class="hist-owner">👤 ${esc(e._owner)}</div>` : ''}
+      <div class="hist-site">${esc(e.site || 'ללא שם אתר')}</div>
+      <div class="hist-sum">${esc(sum || '—')}</div>
+      <div class="hist-actions">
+        ${ro ? `<button class="btn primary" data-act="view">👁️ הצג</button><button class="btn" data-act="wa">📤 שלח</button><button class="btn" data-act="xlsx">📊</button>`
+        : `<button class="btn primary" data-act="open">✏️ פתח / ערוך</button><button class="btn" data-act="wa">📤 שלח</button><button class="btn danger-ghost" data-act="del">🗑️</button>`}
+      </div></div>`;
+  }).join('');
+}
+function findHist(key) { return histSource().find((e) => String(e._key) === String(key)); }
+function logTextFor(e) {
+  if (histUser === 'me') return formatLog(e, true);
+  return formatLog(e, true).replace(/^(👷 מנהל עבודה: ).*$/m, `$1${e._owner}`);
+}
 
-let chat = loadChat();
-function loadChat() { try { return JSON.parse(localStorage.getItem(LS_CHAT)) || []; } catch { return []; } }
-function persistChat() { localStorage.setItem(LS_CHAT, JSON.stringify(chat.slice(-40))); }
+/* ---------------- AI chat (server-side Gemini via edge function 'ai') ---------------- */
+let chat = [];
+function loadChat() { return uid() ? jget(ukey('chat'), []) : []; }
+function persistChat() { if (uid()) jset(ukey('chat'), chat.slice(-40)); }
 let busy = false;
+const aiAllowed = () => !!me && (isAdmin() || me.ai_enabled);
 
 function renderChat() {
   const box = $('#chatLog');
-  const key = store.settings().apiKey;
   let html = '';
-  if (!key) {
-    html += `<div class="msg sys">🔑 <b>לא הוגדר מפתח API.</b><br>כדי להשתמש בעוזר ה-AI יש להזין מפתח Anthropic במסך ההגדרות (פעם אחת, נשמר רק במכשיר הזה).<button class="btn amber" data-go="settings">⚙️ למסך ההגדרות</button></div>`;
+  if (!aiAllowed()) {
+    html += `<div class="msg sys">🔒 <b>עוזר ה-AI לא הופעל עבורך.</b><br>אפשר להמשיך למלא את היומן ידנית. להפעלה – פנה למנהל.</div>`;
   }
   if (!chat.length) {
-    html += `<div class="msg ai">שלום בן 👋<br>ספר לי במילים שלך מה היה היום באתר – מי היה, איזה ציוד, מה עשיתם ומתי עבדתם.<br>אני אנסח יומן מקצועי, תראה תצוגה מקדימה, ורק אחרי שתאשר אמלא את הטופס.</div>`;
+    const name = me ? (me.display_name || me.username).split(' ')[0] : '';
+    html += `<div class="msg ai">שלום ${esc(name)} 👋<br>ספר לי במילים שלך מה היה היום באתר – מי היה, איזה ציוד, מה עשיתם ומתי עבדתם.<br>אני אנסח יומן מקצועי, תראה תצוגה מקדימה, ורק אחרי שתאשר אמלא את הטופס.</div>`;
   }
   const lastPv = chat.map((m) => !!m.log).lastIndexOf(true);
   chat.forEach((m, i) => {
@@ -419,6 +636,7 @@ function renderChat() {
   });
   if (busy) html += '<div class="typing"><i></i><i></i><i></i></div>';
   box.innerHTML = html;
+  $('#chatInput').disabled = !aiAllowed(); $('#chatSend').disabled = busy || !aiAllowed();
 }
 function scrollChat() { window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }); }
 
@@ -468,51 +686,35 @@ function buildApiMessages() {
   return msgs;
 }
 
-async function callClaude(messages, opts = {}) {
-  const s = store.settings();
-  if (!s.apiKey) throw new Error('לא הוגדר מפתח API. היכנס להגדרות והזן מפתח Anthropic.');
+/** Calls the 'ai' edge function. The server holds the Gemini key and the system prompt. */
+async function callAI(body) {
   if (!navigator.onLine) throw new Error('אין חיבור לאינטרנט – עוזר ה-AI עובד רק אונליין. אפשר להמשיך למלא את היומן ידנית.');
-  const models = [s.model || DEFAULT_MODEL, ...FALLBACK_MODELS.filter((m) => m !== s.model)];
-  let lastErr;
-  for (const model of models) {
-    let res;
-    try {
-      res = await fetch(API_URL, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-api-key': s.apiKey,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
-        body: JSON.stringify({ model, max_tokens: opts.maxTokens || 2000, system: opts.system ?? SYSTEM_PROMPT, messages }),
-      });
-    } catch { throw new Error('שגיאת רשת – בדוק את החיבור לאינטרנט ונסה שוב.'); }
-    if (res.ok) {
-      const d = await res.json();
-      return { text: (d.content || []).filter((b) => b.type === 'text').map((b) => b.text).join(''), model };
-    }
-    const err = await res.json().catch(() => ({}));
-    const msg = err?.error?.message || res.statusText;
-    if (res.status === 404 || (res.status === 400 && /model/i.test(msg))) { lastErr = new Error(`המודל ${model} לא זמין`); continue; }
-    if (res.status === 401) throw new Error('מפתח ה-API לא תקין (401). בדוק אותו במסך ההגדרות.');
-    if (res.status === 403) throw new Error('למפתח אין הרשאה (403): ' + msg);
-    if (res.status === 429) throw new Error('יותר מדי בקשות או חריגה ממכסה (429). נסה שוב בעוד דקה.');
-    if (res.status === 529 || res.status >= 500) throw new Error(`שירות ה-AI עמוס כרגע (${res.status}). נסה שוב.`);
-    throw new Error(`שגיאה מה-AI (${res.status}): ${msg}`);
-  }
-  throw lastErr || new Error('לא נמצא מודל זמין');
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) throw new Error('ההתחברות פגה – התחבר מחדש.');
+  let res;
+  try {
+    res = await fetch(`${SB_URL}/functions/v1/ai`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', apikey: SB_KEY, authorization: `Bearer ${session.access_token}` },
+      body: JSON.stringify(body),
+    });
+  } catch { throw new Error('שגיאת רשת – בדוק את החיבור לאינטרנט ונסה שוב.'); }
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(d.error || `שגיאה מה-AI (${res.status})`);
+  if (d.used != null) aiUsage = { used: d.used, limit: d.limit };
+  return d;
 }
+let aiUsage = null;
 
 async function sendChat() {
   const input = $('#chatInput');
   const text = input.value.trim();
   if (!text || busy) return;
-  if (!store.settings().apiKey) { renderChat(); toast('צריך להגדיר מפתח API קודם'); return; }
+  if (!aiAllowed()) { renderChat(); return; }
   chat.push({ role: 'user', content: text }); input.value = ''; growComposer();
   busy = true; persistChat(); renderChat(); scrollChat(); $('#chatSend').disabled = true;
   try {
-    const { text: raw } = await callClaude(buildApiMessages());
+    const { text: raw } = await callAI({ messages: buildApiMessages() });
     let parsed;
     try { parsed = parseJSONLoose(raw); } catch { parsed = { reply: raw, log: null }; }
     const base = readForm();
@@ -521,7 +723,7 @@ async function sendChat() {
   } catch (e) {
     chat.push({ role: 'error', content: e.message || String(e) });
   } finally {
-    busy = false; $('#chatSend').disabled = false; persistChat(); renderChat(); scrollChat();
+    busy = false; persistChat(); renderChat(); scrollChat();
   }
 }
 
@@ -544,19 +746,111 @@ function growComposer() { const t = $('#chatInput'); t.style.height = 'auto'; t.
 
 /* ---------------- settings ---------------- */
 function renderSettings() {
-  const s = store.settings();
-  $('#apiKey').value = s.apiKey || '';
-  $('#model').value = s.model || DEFAULT_MODEL;
+  if (!me) return;
+  const s = store.settings(), c = company.get();
+  $('#acctName').textContent = me.display_name || me.username;
+  $('#acctUser').textContent = me.username;
+  $('#acctRole').textContent = isAdmin() ? 'מנהל מערכת' : 'משתמש';
+  $('#aiStatus').textContent = aiAllowed() ? `✓ עוזר AI פעיל${aiUsage ? ` · ${aiUsage.used}/${aiUsage.limit} בקשות היום` : ''}` : '✗ עוזר AI לא מופעל עבורך';
   $('#foreman').value = s.foreman || '';
-  $('#company').value = s.company || '';
+  $('#company').value = c.company_name || '';
+  $('#company').disabled = !isAdmin();
   renderLogoPreview();
-  $('#keyStatus').textContent = s.apiKey ? `✓ מפתח שמור במכשיר (…${s.apiKey.slice(-4)})` : 'לא הוגדר מפתח';
   $('#ver').textContent = APP_VERSION;
 }
 
 function renderLogoPreview() {
   const l = companyLogo.get();
   $('#logoPreview').innerHTML = l ? `<img src="${l.dataUrl}" alt="לוגו החברה">` : '<span>אין לוגו</span>';
+}
+
+async function saveCompanyRemote(patch) {
+  if (!isAdmin()) throw new Error('רק מנהל יכול לשנות את פרטי החברה');
+  if (!navigator.onLine) throw new Error('שינוי פרטי החברה דורש חיבור לאינטרנט');
+  const { data, error } = await sb.from('app_settings').update({ ...patch, updated_at: new Date().toISOString(), updated_by: uid() })
+    .eq('id', 1).select('company_name,logo,updated_at').single();
+  if (error) throw error;
+  company.set({ company_name: data.company_name || '', logo: data.logo || null, updated_at: data.updated_at });
+  return data;
+}
+
+async function changePassword() {
+  const p1 = $('#newPass').value, p2 = $('#newPass2').value, st = $('#passStatus');
+  if (p1.length < 8) { st.textContent = 'סיסמה חייבת להכיל לפחות 8 תווים'; return; }
+  if (p1 !== p2) { st.textContent = 'הסיסמאות לא תואמות'; return; }
+  if (!navigator.onLine) { st.textContent = 'נדרש חיבור לאינטרנט'; return; }
+  st.textContent = 'מעדכן…';
+  const { error } = await sb.auth.updateUser({ password: p1 });
+  if (error) { st.textContent = '✗ ' + (/different from the old/i.test(error.message) ? 'הסיסמה החדשה זהה לישנה' : error.message); return; }
+  $('#newPass').value = $('#newPass2').value = ''; st.textContent = '✓ הסיסמה עודכנה'; toast('הסיסמה עודכנה ✓');
+}
+
+/* ---------------- admin: users ---------------- */
+async function adminCall(body) {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) throw new Error('ההתחברות פגה');
+  const res = await fetch(`${SB_URL}/functions/v1/admin-users`, {
+    method: 'POST', headers: { 'content-type': 'application/json', apikey: SB_KEY, authorization: `Bearer ${session.access_token}` }, body: JSON.stringify(body),
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(d.error || `שגיאה (${res.status})`);
+  return d;
+}
+async function loadUsers(silent = false) {
+  if (!isAdmin()) return;
+  if (!navigator.onLine) { if (!silent) $('#usersList').innerHTML = '<div class="card muted">ניהול משתמשים דורש חיבור לאינטרנט</div>'; return; }
+  const d = await adminCall({ action: 'list' });
+  usersCache = d.users || [];
+  if (!silent) renderUsers();
+}
+const fmtWhen = (iso) => { if (!iso) return 'עוד לא נכנס'; const d = new Date(iso); return `${fmtDate(isoOf(d))} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+function renderUsers() {
+  $('#usersList').innerHTML = usersCache.map((u) => {
+    const self = u.id === uid();
+    return `<div class="card user-card ${u.disabled ? 'is-disabled' : ''}" data-id="${u.id}">
+      <div class="u-head">
+        <div class="u-avatar">${esc((u.display_name || u.username).trim().charAt(0).toUpperCase())}</div>
+        <div class="u-names"><b>${esc(u.display_name || u.username)}</b><small dir="ltr">${esc(u.username)}${u.email && !u.email.endsWith('@' + USER_DOMAIN) ? ' · ' + esc(u.email) : ''}</small></div>
+        <span class="tag ${u.role === 'admin' ? 'admin' : ''}">${u.role === 'admin' ? 'מנהל' : 'משתמש'}</span>
+        ${u.disabled ? '<span class="tag off">מושבת</span>' : ''}
+      </div>
+      <div class="u-meta">📋 ${u.logs} ימים · ✨ ${u.ai_today} בקשות AI היום · 🕒 ${fmtWhen(u.last_sign_in_at)}</div>
+      <div class="u-toggles">
+        <label class="switch"><input type="checkbox" data-act="ai" ${u.ai_enabled || u.role === 'admin' ? 'checked' : ''} ${u.role === 'admin' ? 'disabled' : ''}><span></span> עוזר AI</label>
+        ${self ? '' : `<label class="switch"><input type="checkbox" data-act="active" ${u.disabled ? '' : 'checked'}><span></span> פעיל</label>`}
+      </div>
+      <div class="u-actions">
+        <button class="btn" data-act="pass">🔑 איפוס סיסמה</button>
+        <button class="btn" data-act="logs">🗂️ יומנים</button>
+        ${self ? '' : '<button class="btn danger-ghost" data-act="delete">🗑️</button>'}
+      </div>
+    </div>`;
+  }).join('') || '<div class="card muted">אין משתמשים</div>';
+}
+function genPassword() {
+  const a = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const r = crypto.getRandomValues(new Uint32Array(12));
+  return 'Bmb-' + [...r].map((x) => a[x % a.length]).join('');
+}
+function showSecret(title, user, pass) {
+  $('#pwSheetTitle').textContent = title;
+  $('#pwSheetUser').textContent = user; $('#pwSheetPass').textContent = pass;
+  $('#pwSheet').hidden = false;
+}
+async function createUser(ev) {
+  ev && ev.preventDefault();
+  const username = $('#nuUser').value.trim().toLowerCase(), display_name = $('#nuName').value.trim();
+  const password = $('#nuPass').value || genPassword();
+  const st = $('#nuStatus'); st.textContent = '';
+  if (!/^[a-z0-9._-]{2,32}$/.test(username)) { st.textContent = 'שם משתמש: 2–32 תווים באנגלית (אותיות קטנות, ספרות, . _ -)'; return; }
+  if (password.length < 8) { st.textContent = 'סיסמה: לפחות 8 תווים'; return; }
+  $('#nuBtn').disabled = true; st.textContent = 'יוצר משתמש…';
+  try {
+    await adminCall({ action: 'create', username, display_name, password, ai_enabled: $('#nuAi').checked, role: $('#nuRole').value });
+    st.textContent = '✓ המשתמש נוצר'; $('#nuForm').reset(); $('#nuAi').checked = true;
+    showSecret('המשתמש נוצר ✓', username, password);
+    await loadUsers();
+  } catch (e) { st.textContent = '✗ ' + e.message; } finally { $('#nuBtn').disabled = false; }
 }
 
 /* ---------------- excel export ---------------- */
@@ -572,12 +866,16 @@ function rangeDates(kind) {
 function rangeEntries() {
   const kind = ($('#rangeChips .chip.on') || {}).dataset?.r || 'week';
   const [from, to] = rangeDates(kind); const site = $('#xSite').value;
-  return Object.values(store.entries()).filter((e) => e.date >= from && e.date <= to && (!site || e.site === site) && hasContent(e))
+  return histSource().filter((e) => e.date >= from && e.date <= to && (!site || e.site === site) && hasContent(e))
     .sort((a, b) => a.date.localeCompare(b.date));
+}
+function exportForemanLabel(list) {
+  if (histUser === 'me') return undefined;
+  return [...new Set(list.map((e) => e._owner))].join(', ');
 }
 function renderExportUI() {
   const sel = $('#xSite'), cur = sel.value;
-  const sites = [...new Set(Object.values(store.entries()).map((e) => e.site).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'he'));
+  const sites = [...new Set(histSource().map((e) => e.site).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'he'));
   sel.innerHTML = '<option value="">כל האתרים</option>' + sites.map((x) => `<option ${x === cur ? 'selected' : ''}>${esc(x)}</option>`).join('');
   const kind = ($('#rangeChips .chip.on') || {}).dataset?.r;
   $('#customRange').hidden = kind !== 'custom';
@@ -607,8 +905,24 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
+/* ---------------- views ---------------- */
+function showView(name) {
+  if (name === 'users' && !isAdmin()) name = 'settings';
+  $$('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${name}`));
+  $$('.tabbar button').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
+  if (name === 'history') { renderHistory(); renderExportUI(); renderHistUserPicker(); }
+  if (name === 'chat') { renderChat(); setTimeout(scrollChat, 30); }
+  if (name === 'settings') renderSettings();
+  if (name === 'users') { renderUsers(); loadUsers().catch((e) => toast(e.message)); }
+  if (name !== 'chat') window.scrollTo({ top: 0 });
+}
+
 /* ---------------- wire up ---------------- */
 function init() {
+  // login
+  $('#loginForm').addEventListener('submit', doLogin);
+  $('#loginEye').addEventListener('click', () => { const k = $('#loginPass'); k.type = k.type === 'password' ? 'text' : 'password'; });
+
   // tabs
   $$('.tabbar button').forEach((b) => b.addEventListener('click', () => showView(b.dataset.view)));
   document.addEventListener('click', (e) => {
@@ -648,7 +962,7 @@ function init() {
   $('#nextDay').addEventListener('click', () => loadDate(addDays(current.date, 1)));
   $('#todayBtn').addEventListener('click', () => loadDate(todayISO()));
 
-  $('#saveBtn').addEventListener('click', () => saveCurrent(false));
+  $('#saveBtn').addEventListener('click', () => { saveCurrent(false); syncNow(); });
   $('#waBtn').addEventListener('click', shareWhatsApp);
   $('#shareBtn').addEventListener('click', shareNative);
   $('#copyBtn').addEventListener('click', () => { readForm(); if (!hasContent(current)) return toast('היומן ריק'); copyText(currentText()); });
@@ -659,17 +973,28 @@ function init() {
   });
   window.addEventListener('beforeprint', () => { readForm(); buildPrint(current); });
   window.addEventListener('pagehide', () => { if (dirty) saveCurrent(true); });
-  document.addEventListener('visibilitychange', () => { if (document.hidden && dirty) saveCurrent(true); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && dirty) saveCurrent(true);
+    if (!document.hidden && uid()) syncNow();
+  });
 
   // history
   $('#histSearch').addEventListener('input', renderHistory);
+  $('#histUser').addEventListener('change', async (e) => {
+    histUser = e.target.value;
+    if (histUser !== 'me') { $('#histList').innerHTML = '<div class="card muted">טוען…</div>'; await loadRemoteLogs(); }
+    renderHistory(); renderExportUI();
+  });
   $('#histList').addEventListener('click', (e) => {
     const btn = e.target.closest('[data-act]'); if (!btn) return;
-    const date = btn.closest('.hist-item').dataset.date;
-    if (btn.dataset.act === 'open') { loadDate(date); showView('log'); }
-    if (btn.dataset.act === 'wa') { const en = store.get(date); window.open('https://wa.me/?text=' + encodeURIComponent(formatLog(en, true)), '_blank'); }
-    if (btn.dataset.act === 'del' && confirm(`למחוק את היומן של ${fmtDate(date)}?`)) {
-      store.del(date); if (date === current.date) loadDate(date); renderHistory(); toast('נמחק');
+    const en = findHist(btn.closest('.hist-item').dataset.key); if (!en) return;
+    const act = btn.dataset.act;
+    if (act === 'open') { loadDate(en.date); showView('log'); }
+    if (act === 'wa') window.open('https://wa.me/?text=' + encodeURIComponent(logTextFor(en)), '_blank');
+    if (act === 'view') { $('#viewSheetText').textContent = logTextFor(en).replace(/\*/g, ''); $('#viewSheet').hidden = false; }
+    if (act === 'xlsx') runExport([en], { foreman: en._owner });
+    if (act === 'del' && confirm(`למחוק את היומן של ${fmtDate(en.date)}?`)) {
+      store.del(en.date); if (en.date === current.date) { dirty = false; loadDate(en.date); } renderHistory(); renderExportUI(); toast('נמחק');
     }
   });
   $('#exportBtn').addEventListener('click', exportJSON);
@@ -687,37 +1012,67 @@ function init() {
   });
   $('#newChat').addEventListener('click', () => { if (!chat.length || confirm('להתחיל שיחה חדשה?')) { chat = []; persistChat(); renderChat(); } });
 
-  // settings
-  $('#toggleKey').addEventListener('click', () => { const k = $('#apiKey'); k.type = k.type === 'password' ? 'text' : 'password'; });
-  $('#saveKey').addEventListener('click', () => {
-    const k = $('#apiKey').value.trim();
-    if (k && !/^sk-ant-/.test(k) && !confirm('המפתח לא נראה כמו מפתח Anthropic (sk-ant-...). לשמור בכל זאת?')) return;
-    store.saveSettings({ apiKey: k, model: $('#model').value }); renderSettings(); toast(k ? 'המפתח נשמר במכשיר ✓' : 'המפתח נמחק');
+  // settings – account
+  $('#passForm').addEventListener('submit', (e) => { e.preventDefault(); changePassword(); });
+  $('#logoutBtn').addEventListener('click', () => logout(false));
+  $('#testAi').addEventListener('click', async () => {
+    $('#aiStatus').textContent = 'בודק…';
+    try { const r = await callAI({ ping: true }); aiUsage = { used: r.used, limit: r.limit }; $('#aiStatus').textContent = `✓ עוזר AI מחובר · ${r.used}/${r.limit} בקשות היום`; }
+    catch (e) { $('#aiStatus').textContent = '✗ ' + e.message; }
   });
-  $('#clearKey').addEventListener('click', () => { if (confirm('למחוק את המפתח מהמכשיר?')) { store.saveSettings({ apiKey: '' }); renderSettings(); toast('המפתח נמחק'); } });
-  $('#model').addEventListener('change', () => { store.saveSettings({ model: $('#model').value }); toast('המודל עודכן'); });
-  $('#testKey').addEventListener('click', async () => {
-    const k = $('#apiKey').value.trim(); if (k) store.saveSettings({ apiKey: k });
-    $('#keyStatus').textContent = 'בודק…';
-    try {
-      const r = await callClaude([{ role: 'user', content: 'ענה במילה אחת: תקין' }], { system: 'Answer in Hebrew, one word.', maxTokens: 20 });
-      $('#keyStatus').textContent = `✓ החיבור תקין (מודל: ${r.model})`;
-    } catch (e) { $('#keyStatus').textContent = '✗ ' + e.message; }
-  });
+  $('#syncBtn').addEventListener('click', () => syncNow());
   $('#saveProfile').addEventListener('click', () => { store.saveSettings({ foreman: $('#foreman').value.trim() }); toast('הפרטים נשמרו ✓'); });
 
-  // company settings
+  // company settings (admin only – also enforced by RLS on app_settings)
   $('#logoFile').addEventListener('change', async (e) => {
     const f = e.target.files[0]; e.target.value = ''; if (!f) return;
-    try { const r = await resizeImage(f); companyLogo.set(r); renderLogoPreview(); toast('הלוגו נשמר ✓'); }
-    catch (err) { alert(err.name === 'QuotaExceededError' ? 'התמונה גדולה מדי לשמירה במכשיר' : (err.message || 'שגיאה בטעינת התמונה')); }
+    try { const r = await resizeImage(f); await saveCompanyRemote({ logo: r }); renderLogoPreview(); toast('הלוגו נשמר ✓'); }
+    catch (err) { alert(err.message || 'שגיאה בטעינת התמונה'); }
   });
-  $('#logoClear').addEventListener('click', () => { if (companyLogo.get() && confirm('להסיר את לוגו החברה?')) { companyLogo.clear(); renderLogoPreview(); toast('הלוגו הוסר'); } });
-  $('#saveCompany').addEventListener('click', () => {
-    const name = $('#company').value.trim(); store.saveSettings({ company: name });
-    if (name && !$('#f-company').value) { $('#f-company').value = name; markDirty(); }
-    fillSites(); toast('פרטי החברה נשמרו ✓');
+  $('#logoClear').addEventListener('click', async () => {
+    if (!companyLogo.get() || !confirm('להסיר את לוגו החברה?')) return;
+    try { await saveCompanyRemote({ logo: null }); renderLogoPreview(); toast('הלוגו הוסר'); } catch (err) { alert(err.message); }
   });
+  $('#saveCompany').addEventListener('click', async () => {
+    const name = $('#company').value.trim();
+    try {
+      await saveCompanyRemote({ company_name: name });
+      if (name && !$('#f-company').value) { $('#f-company').value = name; markDirty(); }
+      fillSites(); toast('פרטי החברה נשמרו ✓');
+    } catch (err) { alert(err.message); }
+  });
+
+  // admin – users
+  $('#nuForm').addEventListener('submit', createUser);
+  $('#nuGen').addEventListener('click', () => { $('#nuPass').type = 'text'; $('#nuPass').value = genPassword(); });
+  $('#usersRefresh').addEventListener('click', () => loadUsers().catch((e) => toast(e.message)));
+  $('#usersList').addEventListener('change', async (e) => {
+    const inp = e.target.closest('input[data-act]'); if (!inp) return;
+    const id = inp.closest('.user-card').dataset.id;
+    const body = inp.dataset.act === 'ai' ? { action: 'update', id, ai_enabled: inp.checked } : { action: 'update', id, disabled: !inp.checked };
+    try { await adminCall(body); toast('עודכן ✓'); await loadUsers(); } catch (err) { inp.checked = !inp.checked; toast('✗ ' + err.message); }
+  });
+  $('#usersList').addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-act]'); if (!btn) return;
+    const id = btn.closest('.user-card').dataset.id, u = usersCache.find((x) => x.id === id); if (!u) return;
+    if (btn.dataset.act === 'pass') {
+      const p = prompt(`סיסמה חדשה עבור ${u.username} (לפחות 8 תווים).\nהשאר ריק ליצירת סיסמה אקראית:`, '');
+      if (p === null) return;
+      const password = p.trim() || genPassword();
+      try { await adminCall({ action: 'reset_password', id, password }); showSecret('הסיסמה אופסה ✓', u.username, password); } catch (err) { toast('✗ ' + err.message); }
+    }
+    if (btn.dataset.act === 'logs') { histUser = id === uid() ? 'me' : id; showView('history'); if (histUser !== 'me') { await loadRemoteLogs(); renderHistory(); renderExportUI(); } $('#histUser').value = histUser; }
+    if (btn.dataset.act === 'delete' && confirm(`למחוק לצמיתות את המשתמש ${u.username} וכל היומנים שלו?\n(אפשר במקום זה להשבית אותו)`)) {
+      try { await adminCall({ action: 'delete', id }); toast('המשתמש נמחק'); await loadUsers(); } catch (err) { toast('✗ ' + err.message); }
+    }
+  });
+  $('#pwCopy').addEventListener('click', () => copyText(`שם משתמש: ${$('#pwSheetUser').textContent}\nסיסמה: ${$('#pwSheetPass').textContent}\nכניסה: ${location.origin}${location.pathname}`));
+  $('#pwClose').addEventListener('click', () => { $('#pwSheet').hidden = true; $('#pwSheetPass').textContent = ''; });
+  $('#viewClose').addEventListener('click', () => { $('#viewSheet').hidden = true; });
+
+  // migration
+  $('#migYes').addEventListener('click', () => runMigration(true));
+  $('#migNo').addEventListener('click', () => runMigration(false));
 
   // excel export
   $('#xlsxDayBtn').addEventListener('click', () => {
@@ -731,7 +1086,7 @@ function init() {
     renderExportUI();
   });
   ['#xFrom', '#xTo', '#xSite'].forEach((id) => $(id).addEventListener('change', renderExportUI));
-  $('#xlsxRangeBtn').addEventListener('click', () => runExport(rangeEntries(), { siteLabel: $('#xSite').value || undefined }));
+  $('#xlsxRangeBtn').addEventListener('click', () => { const l = rangeEntries(); runExport(l, { siteLabel: $('#xSite').value || undefined, foreman: exportForemanLabel(l) }); });
   $('#xSheetDownload').addEventListener('click', () => { if (lastExport) downloadBlob(lastExport.blob, lastExport.filename); });
   $('#xSheetShare').addEventListener('click', async () => {
     if (!lastExport) return;
@@ -740,14 +1095,18 @@ function init() {
     catch (e) { if (e.name !== 'AbortError') downloadBlob(lastExport.blob, lastExport.filename); }
   });
   $('#xSheetClose').addEventListener('click', () => { $('#xSheet').hidden = true; });
-  $('#xSheet').addEventListener('click', (e) => { if (e.target.id === 'xSheet') $('#xSheet').hidden = true; });
+  $$('.sheet').forEach((s) => s.addEventListener('click', (e) => { if (e.target === s && s.id !== 'migSheet') s.hidden = true; }));
 
   // network status
-  const net = () => { $('#netStatus').classList.toggle('off', !navigator.onLine); $('#netStatus').title = navigator.onLine ? 'מחובר' : 'אופליין'; };
+  const net = () => {
+    $('#netStatus').classList.toggle('off', !navigator.onLine); $('#netStatus').title = navigator.onLine ? 'מחובר' : 'אופליין';
+    if (navigator.onLine && uid()) syncNow(); else if (uid()) { syncState = 'offline'; updateSyncBadge(); }
+  };
   window.addEventListener('online', net); window.addEventListener('offline', net); net();
+  setInterval(() => { if (uid() && navigator.onLine && !document.hidden) syncNow(); }, 60000);
 
-  loadDate(todayISO());
-  renderSettings();
+  sb.auth.onAuthStateChange((ev) => { if (ev === 'SIGNED_OUT' && me) { me = null; showLogin(); } });
+  boot();
 
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     const hadController = !!navigator.serviceWorker.controller;

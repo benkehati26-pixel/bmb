@@ -1,7 +1,7 @@
-/* BMB work log – service worker: offline app shell. AI calls (api.anthropic.com) are never cached. */
-const VERSION = 'bmb-v1.1.0';
+/* BMB work log – service worker: offline app shell. Supabase API / auth / edge-function calls are never cached (network only). */
+const VERSION = 'bmb-v1.2.0';
 const SHELL = [
-  './', './index.html', './style.css', './app.js', './excel.js', './vendor/exceljs.min.js', './manifest.webmanifest',
+  './', './index.html', './style.css', './app.js', './excel.js', './vendor/exceljs.min.js', './vendor/supabase.min.js', './manifest.webmanifest',
   './icons/logo.svg', './icons/favicon-32.png', './icons/icon-192.png', './icons/icon-512.png',
   './icons/apple-touch-icon.png', './icons/maskable-512.png'
 ];
@@ -21,7 +21,7 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
-  if (url.hostname === 'api.anthropic.com') return; // network only
+  if (url.hostname.endsWith('.supabase.co')) return; // API, auth, AI: network only
 
   const isFont = url.hostname === 'fonts.googleapis.com' || url.hostname === 'fonts.gstatic.com';
   if (url.origin !== self.location.origin && !isFont) return;

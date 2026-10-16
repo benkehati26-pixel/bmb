@@ -2,3 +2,4 @@ screens/*.pdf
 screens/*.txt
 .export-test.json
 .DS_Store
+supabase/.temp/

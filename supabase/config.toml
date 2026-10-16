@@ -1,0 +1,7 @@
+project_id = "ufgmhbtimmgumeufwfxq"
+
+[functions.ai]
+verify_jwt = false   # JWT is verified inside the function (auth.getUser)
+
+[functions.admin-users]
+verify_jwt = false   # JWT + admin role verified inside the function

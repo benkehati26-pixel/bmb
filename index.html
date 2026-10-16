@@ -19,7 +19,7 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800&display=swap">
 <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body class="booting">
 <svg class="sprite" width="0" height="0" style="position:absolute;overflow:hidden" aria-hidden="true">
   <defs>
     <linearGradient id="bmbNavy" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#21406F"/><stop offset="1" stop-color="#0E1A31"/></linearGradient>
@@ -38,6 +38,26 @@
   </symbol>
 </svg>
 
+<section id="loginScreen" class="login" hidden aria-label="כניסה">
+  <div class="login-inner">
+    <svg class="login-logo" viewBox="0 0 100 100" role="img" aria-label="BMB"><use href="#bmb-logo"/></svg>
+    <h1>יומן עבודה</h1>
+    <p class="login-sub" dir="ltr">Ben Menachem Bari</p>
+    <form id="loginForm" class="card login-card" autocomplete="on">
+      <h2>כניסה למערכת</h2>
+      <label class="field"><span>👤 שם משתמש</span>
+        <input id="loginUser" name="username" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" dir="ltr" placeholder="ben" enterkeyhint="next"></label>
+      <label class="field"><span>🔒 סיסמה</span>
+        <div class="key-row"><input id="loginPass" name="password" type="password" autocomplete="current-password" dir="ltr" enterkeyhint="go">
+        <button type="button" class="icon-btn" id="loginEye" aria-label="הצג/הסתר סיסמה">👁️</button></div></label>
+      <p id="loginErr" class="login-err" role="alert"></p>
+      <button class="btn primary big" id="loginBtn" type="submit">כניסה</button>
+      <p class="muted small login-note">משתמשים חדשים נוצרים ע״י המנהל בלבד. שכחת סיסמה? פנה למנהל.</p>
+    </form>
+    <p class="login-ver" dir="ltr">BMB · v<span id="loginVer"></span></p>
+  </div>
+</section>
+
 <header class="topbar">
   <div class="brand">
     <svg class="logo" viewBox="0 0 100 100" role="img" aria-label="BMB"><use href="#bmb-logo"/></svg>
@@ -46,7 +66,10 @@
       <span class="brand-sub" dir="ltr">Ben Menachem Bari</span>
     </div>
   </div>
-  <span id="netStatus" class="net" title="מצב חיבור"></span>
+  <div class="top-right">
+    <div class="who"><b id="whoName"></b><small id="whoRole"></small></div>
+    <span id="netStatus" class="net" title="מצב חיבור"></span>
+  </div>
 </header>
 
 <main id="app">
@@ -60,7 +83,7 @@
       </label>
       <button class="icon-btn" id="nextDay" aria-label="יום הבא">‹</button>
     </div>
-    <div class="status-row"><span id="saveStatus" class="badge"></span><button class="link-btn" id="todayBtn">חזרה להיום</button></div>
+    <div class="status-row"><span id="saveStatus" class="badge"></span><span id="syncStatus" class="sync"></span><button class="link-btn" id="todayBtn">חזרה להיום</button></div>
 
     <form id="logForm" class="card form" autocomplete="off" onsubmit="return false">
       <label class="field">
@@ -144,6 +167,9 @@
 
   <!-- ===== HISTORY ===== -->
   <section id="view-history" class="view" aria-label="היסטוריה">
+    <div class="card admin-only hist-user-card">
+      <label class="field"><span>👥 יומנים של</span><select id="histUser"><option value="me">היומנים שלי</option></select></label>
+    </div>
     <div class="card">
       <input id="histSearch" type="search" placeholder="🔎 חיפוש לפי אתר, עבודה, שם...">
     </div>
@@ -165,9 +191,9 @@
       <button class="btn excel big" id="xlsxRangeBtn">📊 ייצוא לאקסל</button>
     </div>
     <div id="histList" class="hist-list"></div>
-    <div class="card backup">
+    <div class="card backup" id="backupCard">
       <h3>גיבוי</h3>
-      <p class="muted">הנתונים נשמרים רק במכשיר הזה. מומלץ לייצא גיבוי מדי פעם.</p>
+      <p class="muted">היומנים נשמרים בחשבון שלך בענן ובמכשיר (עובד גם בלי אינטרנט ומסתנכרן אוטומטית). אפשר גם לייצא גיבוי JSON.</p>
       <div class="grid2">
         <button class="btn" id="exportBtn">⬇️ ייצוא JSON</button>
         <label class="btn" for="importFile">⬆️ ייבוא JSON</label>
@@ -178,29 +204,28 @@
 
   <!-- ===== SETTINGS ===== -->
   <section id="view-settings" class="view" aria-label="הגדרות">
+    <div class="card account-card">
+      <h3>👤 החשבון שלי</h3>
+      <div class="acct"><div><b id="acctName"></b><small dir="ltr" id="acctUser"></small></div><span class="tag" id="acctRole"></span></div>
+      <form id="passForm" autocomplete="off">
+        <input type="text" name="username" autocomplete="username" hidden>
+        <div class="grid2">
+          <label class="field"><span>סיסמה חדשה</span><input id="newPass" type="password" autocomplete="new-password" dir="ltr" minlength="8"></label>
+          <label class="field"><span>אימות סיסמה</span><input id="newPass2" type="password" autocomplete="new-password" dir="ltr" minlength="8"></label>
+        </div>
+        <button class="btn primary" id="changePass" type="submit">🔑 שנה סיסמה</button>
+        <p id="passStatus" class="muted small"></p>
+      </form>
+      <div class="grid2">
+        <button class="btn" id="syncBtn" type="button">🔄 סנכרן עכשיו</button>
+        <button class="btn danger-ghost" id="logoutBtn" type="button">🚪 התנתק</button>
+      </div>
+    </div>
     <div class="card">
-      <h3>🔑 מפתח Anthropic API (עבור עוזר ה-AI)</h3>
-      <p class="muted">המפתח נשמר <b>רק במכשיר הזה</b> (localStorage) ונשלח ישירות ל-Anthropic. הוא לא נשמר בשום שרת או בקוד.</p>
-      <div class="key-row">
-        <input id="apiKey" type="password" placeholder="sk-ant-..." autocomplete="off" autocapitalize="off" spellcheck="false" dir="ltr">
-        <button class="icon-btn" id="toggleKey" aria-label="הצג/הסתר">👁️</button>
-      </div>
-      <div class="grid3">
-        <button class="btn primary" id="saveKey">שמור מפתח</button>
-        <button class="btn" id="testKey">בדוק חיבור</button>
-        <button class="btn danger-ghost" id="clearKey">מחק מפתח</button>
-      </div>
-      <p id="keyStatus" class="muted small"></p>
-      <label class="field">
-        <span>מודל</span>
-        <select id="model" dir="ltr">
-          <option value="claude-sonnet-5-5">claude-sonnet-5-5 (מומלץ)</option>
-          <option value="claude-sonnet-5">claude-sonnet-5</option>
-          <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
-          <option value="claude-sonnet-4-5-20250929">claude-sonnet-4-5</option>
-          <option value="claude-haiku-5-5">claude-haiku-5-5 (מהיר וזול)</option>
-        </select>
-      </label>
+      <h3>✨ עוזר AI</h3>
+      <p class="muted">העוזר רץ בשרת המאובטח של האפליקציה (Google Gemini). אין צורך במפתח במכשיר.</p>
+      <p id="aiStatus" class="muted small"></p>
+      <button class="btn" id="testAi" type="button">בדוק חיבור</button>
     </div>
     <div class="card">
       <h3>👷 פרטים</h3>
@@ -209,26 +234,52 @@
     </div>
     <div class="card">
       <h3>🏢 פרטי חברת הבנייה</h3>
-      <p class="muted">השם והלוגו יופיעו בראש קובץ האקסל ובהדפסה. הלוגו נשמר רק במכשיר.</p>
+      <p class="muted">השם והלוגו יופיעו בראש קובץ האקסל ובהדפסה ומשותפים לכל המשתמשים.</p>
+      <p class="muted small user-only">🔒 רק מנהל המערכת יכול לשנות את פרטי החברה.</p>
       <label class="field"><span>שם החברה</span><input id="company" placeholder="לדוגמה: א.ב. בנייה והשקעות בע״מ"></label>
       <div class="field">
         <span>לוגו החברה</span>
         <div class="logo-box">
           <div class="logo-preview" id="logoPreview"><span>אין לוגו</span></div>
-          <div class="logo-btns">
+          <div class="logo-btns admin-only">
             <label class="btn" for="logoFile">🖼️ בחר תמונה</label>
             <button class="btn danger-ghost" id="logoClear" type="button">הסר לוגו</button>
           </div>
         </div>
         <input type="file" id="logoFile" accept="image/*" hidden>
       </div>
-      <button class="btn primary" id="saveCompany">שמור פרטי חברה</button>
+      <button class="btn primary admin-only" id="saveCompany">שמור פרטי חברה</button>
+    </div>
+    <div class="card admin-only">
+      <h3>👥 ניהול משתמשים</h3>
+      <p class="muted">יצירת משתמשים, איפוס סיסמה, השבתה והפעלת עוזר AI.</p>
+      <button class="btn primary" data-go="users" type="button">👥 למסך המשתמשים</button>
     </div>
     <div class="card">
       <h3>📱 התקנה באייפון</h3>
-      <p class="muted">ב-Safari: לחץ על כפתור השיתוף <b>⬆️</b> ← <b>הוסף למסך הבית</b>. האפליקציה תיפתח במסך מלא ותעבוד גם בלי אינטרנט (חוץ מעוזר ה-AI).</p>
+      <p class="muted">ב-Safari: לחץ על כפתור השיתוף <b>⬆️</b> ← <b>הוסף למסך הבית</b>. האפליקציה תיפתח במסך מלא ותעבוד גם בלי אינטרנט (חוץ מעוזר ה-AI). השינויים יסתנכרנו כשהחיבור יחזור.</p>
     </div>
     <p class="footer-note" dir="ltr">BMB · Ben Menachem Bari · v<span id="ver"></span></p>
+  </section>
+  <!-- ===== USERS (admin) ===== -->
+  <section id="view-users" class="view" aria-label="ניהול משתמשים">
+    <div class="chat-head"><div><h2>👥 ניהול משתמשים</h2><p>רק מנהל רואה את המסך הזה.</p></div><button class="link-btn" id="usersRefresh">רענן</button></div>
+    <form class="card" id="nuForm" autocomplete="off">
+      <h3>➕ משתמש חדש</h3>
+      <div class="grid2">
+        <label class="field"><span>שם משתמש (באנגלית)</span><input id="nuUser" dir="ltr" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="moshe" autocomplete="off"></label>
+        <label class="field"><span>שם מלא</span><input id="nuName" placeholder="משה כהן" autocomplete="off"></label>
+      </div>
+      <label class="field"><span>סיסמה ראשונית</span>
+        <div class="key-row"><input id="nuPass" type="password" dir="ltr" placeholder="ריק = סיסמה אקראית" autocomplete="new-password"><button type="button" class="icon-btn" id="nuGen" aria-label="צור סיסמה">🎲</button></div></label>
+      <div class="grid2">
+        <label class="field"><span>הרשאה</span><select id="nuRole"><option value="user">משתמש</option><option value="admin">מנהל</option></select></label>
+        <label class="switch big"><input type="checkbox" id="nuAi" checked><span></span> עוזר AI</label>
+      </div>
+      <button class="btn primary big" id="nuBtn" type="submit">צור משתמש</button>
+      <p id="nuStatus" class="muted small"></p>
+    </form>
+    <div id="usersList"></div>
   </section>
 </main>
 
@@ -236,6 +287,7 @@
   <button data-view="log" class="active"><span>📋</span>יומן</button>
   <button data-view="chat"><span>✨</span>עוזר AI</button>
   <button data-view="history"><span>🗂️</span>היסטוריה</button>
+  <button data-view="users" class="admin-only"><span>👥</span>משתמשים</button>
   <button data-view="settings"><span>⚙️</span>הגדרות</button>
 </nav>
 
@@ -249,11 +301,37 @@
     <button class="btn" id="xSheetClose">סגור</button>
   </div>
 </div>
+<div id="migSheet" class="sheet" hidden>
+  <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="migTitle">
+    <div class="sheet-icon">☁️</div>
+    <b id="migTitle">נמצאו <span id="migCount"></span> ימי יומן במכשיר</b>
+    <small class="muted">הימים נשמרו במכשיר הזה לפני שהיה חשבון. להעלות אותם לחשבון שלך כדי שיישמרו בענן?</small>
+    <button class="btn primary big" id="migYes">⬆️ העלה לחשבון שלי</button>
+    <button class="btn" id="migNo">לא עכשיו</button>
+  </div>
+</div>
+<div id="pwSheet" class="sheet" hidden>
+  <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="pwSheetTitle">
+    <div class="sheet-icon">🔑</div>
+    <b id="pwSheetTitle"></b>
+    <small class="muted">העבר את הפרטים לעובד. הסיסמה לא תוצג שוב.</small>
+    <div class="cred" dir="ltr"><div>user: <b id="pwSheetUser"></b></div><div>pass: <b id="pwSheetPass"></b></div></div>
+    <button class="btn primary" id="pwCopy">📋 העתק פרטים</button>
+    <button class="btn" id="pwClose">סגור</button>
+  </div>
+</div>
+<div id="viewSheet" class="sheet" hidden>
+  <div class="sheet-card" role="dialog" aria-modal="true">
+    <pre id="viewSheetText" class="view-text"></pre>
+    <button class="btn" id="viewClose">סגור</button>
+  </div>
+</div>
 <div id="busy" class="busy" hidden><div class="spinner"></div><span id="busyText">מכין קובץ…</span></div>
 
 <div id="toast" role="status" aria-live="polite"></div>
 <div id="printArea" aria-hidden="true"></div>
 
+<script src="vendor/supabase.min.js"></script>
 <script src="app.js"></script>
 <script src="excel.js"></script>
 </body>
