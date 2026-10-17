@@ -1,5 +1,5 @@
 /* BMB work log – service worker: offline app shell. Supabase API / auth / edge-function calls are never cached (network only). */
-const VERSION = 'bmb-v1.2.0';
+const VERSION = 'bmb-v1.3.0';
 const SHELL = [
   './', './index.html', './style.css', './app.js', './excel.js', './vendor/exceljs.min.js', './vendor/supabase.min.js', './manifest.webmanifest',
   './icons/logo.svg', './icons/favicon-32.png', './icons/icon-192.png', './icons/icon-512.png',

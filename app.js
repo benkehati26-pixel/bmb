@@ -5,7 +5,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const SB_URL = 'https://ufgmhbtimmgumeufwfxq.supabase.co';
 const SB_KEY = 'sb_publishable_PHuOoNjPXQ8kEhXzGEKvhA_MGpInny-'; // public publishable key
 const USER_DOMAIN = 'bmb.local';
@@ -69,8 +69,8 @@ const companyLogo = { get() { return company.get().logo || null; } }; // used by
 /* ---------------- sync ---------------- */
 let syncing = false, syncTimer = null, syncState = 'idle', lastSyncAt = null;
 function scheduleSync(ms = 1200) { clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, ms); }
-const entryData = (e) => ({ site: e.site || '', company: e.company || '', start: e.start || '', end: e.end || '', weather: e.weather || '', crew: e.crew || [], work: e.work || '', notes: e.notes || '' });
-const rowToEntry = (r) => Object.assign({ date: r.date, site: '', company: '', start: '', end: '', weather: '', crew: [], work: '', notes: '' }, r.data || {}, { date: r.date, updatedAt: r.updated_at });
+const entryData = (e) => ({ site: e.site || '', company: e.company || '', start: e.start || '', end: e.end || '', weather: e.weather || '', crew: e.crew || [], work: e.work || '', notes: e.notes || '', photos: e.photos || [] });
+const rowToEntry = (r) => Object.assign({ date: r.date, site: '', company: '', start: '', end: '', weather: '', crew: [], work: '', notes: '', photos: [] }, r.data || {}, { date: r.date, updatedAt: r.updated_at });
 
 async function syncNow() {
   if (!uid() || syncing) return;
@@ -302,8 +302,8 @@ const fmtDur = (m) => (m == null ? '—' : `${Math.floor(m / 60)}:${pad(m % 60)}
 const hoursText = (m) => { const h = Math.round((m / 60) * 100) / 100; return h === 1 ? 'שעה אחת' : `${h} שעות`; };
 
 /* ---------------- entry model ---------------- */
-const blankEntry = (date) => ({ date, site: '', company: store.settings().company || '', start: '', end: '', weather: '', crew: [], work: '', notes: '' });
-const hasContent = (e) => !!(e.site || e.start || e.end || e.weather || e.work || e.notes || e.crew.some((c) => c.name));
+const blankEntry = (date) => ({ date, site: '', company: store.settings().company || '', start: '', end: '', weather: '', crew: [], work: '', notes: '', photos: [] });
+const hasContent = (e) => !!(e.site || e.start || e.end || e.weather || e.work || e.notes || (e.crew || []).some((c) => c.name) || (e.photos || []).length);
 let current = blankEntry(todayISO());
 let dirty = false;
 
@@ -339,6 +339,12 @@ function formatLog(e, bold = true) {
   if (crew.length) { L.push('', B('נוכחים באתר:')); crew.forEach((c) => L.push(`• ${crewLine(c)}`)); }
   if (e.work && e.work.trim()) { L.push('', B('עבודות שבוצעו:'), bulletize(e.work)); }
   if (e.notes && e.notes.trim()) { L.push('', B('הערות:'), bulletize(e.notes)); }
+  const ph = e.photos || [];
+  if (ph.length) {
+    const urls = ph.map((p) => photoUrls.peek(p.path)).filter(Boolean);
+    L.push('', B(`📷 תמונות (${ph.length}):`));
+    if (urls.length) { urls.forEach((u) => L.push(u)); L.push('(הקישורים תקפים ל-7 ימים)'); } else L.push('התמונות שמורות ביומן באפליקציה');
+  }
   L.push('', '— BMB · Ben Menachem Bari');
   return L.join('\n');
 }
@@ -373,7 +379,7 @@ function fillForm(e) {
   $('#f-weather').value = e.weather || '';
   $('#f-work').value = e.work || '';
   $('#f-notes').value = e.notes || '';
-  renderCrew(); updateTotal(); syncChips(); fillSites(); autoGrow();
+  renderCrew(); updateTotal(); syncChips(); fillSites(); autoGrow(); renderDayPhotos();
 }
 
 function renderCrew() {
@@ -582,7 +588,7 @@ function renderHistory() {
     const m = minutesBetween(e.start, e.end);
     const crewN = (e.crew || []).filter((c) => c.type === 'פועלים' || c.type === 'קבלן משנה').reduce((a, c) => a + (Number(c.count) || 0), 0);
     const equip = (e.crew || []).filter((c) => c.type === 'ציוד').map((c) => c.name).join(', ');
-    const sum = [crewN ? `${crewN} עובדים` : '', equip, (e.work || '').replace(/[•\n]+/g, ' ').trim()].filter(Boolean).join(' · ');
+    const sum = [(e.photos || []).length ? `📷 ${e.photos.length}` : '', crewN ? `${crewN} עובדים` : '', equip, (e.work || '').replace(/[•\n]+/g, ' ').trim()].filter(Boolean).join(' · ');
     return `<div class="hist-item ${e.date === todayISO() ? 'is-today' : ''}" data-key="${esc(e._key)}">
       <div class="hist-top"><span class="hist-date">${weekday(e.date)}, ${fmtDate(e.date)}</span><span class="hist-hours">${!ro && pend[e.date] ? '<span title="ממתין לסנכרון">⏳</span> ' : ''}${m != null ? '⏰ ' + fmtDur(m) : ''}</span></div>
       ${ro ? `<div class="hist-owner">👤 ${esc(e._owner)}</div>` : ''}
@@ -619,7 +625,7 @@ function renderChat() {
   }
   const lastPv = chat.map((m) => !!m.log).lastIndexOf(true);
   chat.forEach((m, i) => {
-    if (m.role === 'user') html += `<div class="msg user">${esc(m.content)}</div>`;
+    if (m.role === 'user') html += `<div class="msg user">${(m.photos || []).length ? `<div class="msg-photos">${m.photos.map((p) => `<img src="${p.thumb}" alt="">`).join('')}</div>` : ''}${esc(m.content)}</div>`;
     else if (m.role === 'error') html += `<div class="msg err">⚠️ ${esc(m.content)}</div>`;
     else if (m.role === 'assistant') {
       if (m.reply) html += `<div class="msg ai">${esc(m.reply)}</div>`;
@@ -629,7 +635,7 @@ function renderChat() {
           <header><span>${m.approved ? '✓ מולא ביומן' : '👀 תצוגה מקדימה'}</span><span>${fmtDate(m.log.date)}</span></header>
           <pre>${esc(formatLog(m.log, false))}</pre>
           ${m.approved || i !== lastPv ? (m.approved ? `<div class="pv-actions"><button class="btn" data-go="log" style="grid-column:1/-1">📋 פתח את היומן</button></div>` : '')
-            : `<div class="pv-actions"><button class="btn primary" data-act="approve">✓ אשר ומלא</button><button class="btn" data-act="fix">✎ תקן</button></div>`}
+            : `${unattachedPhotos(i).length ? `<label class="pv-attach"><input type="checkbox" id="pvAttach" checked> 📎 צרף ${unattachedPhotos(i).length} תמונות ליומן של היום</label>` : ''}<div class="pv-actions"><button class="btn primary" data-act="approve">✓ אשר ומלא</button><button class="btn" data-act="fix">✎ תקן</button></div>`}
         </div>`;
       }
     }
@@ -681,7 +687,7 @@ function buildApiMessages() {
   });
   while (msgs.length && msgs[0].role !== 'user') msgs.shift();
   const last = msgs[msgs.length - 1];
-  const context = { today: todayISO(), today_weekday: weekday(todayISO()), form_date: ctx.date, current_form: { ...ctx, updatedAt: undefined } };
+  const context = { today: todayISO(), today_weekday: weekday(todayISO()), form_date: ctx.date, current_form: { ...ctx, updatedAt: undefined, photos: undefined } };
   last.content = `[הקשר – לא מהמשתמש]\n${JSON.stringify(context)}\n\n[הודעת מנהל העבודה]\n${last.content}`;
   return msgs;
 }
@@ -708,13 +714,20 @@ let aiUsage = null;
 
 async function sendChat() {
   const input = $('#chatInput');
-  const text = input.value.trim();
-  if (!text || busy) return;
+  let text = input.value.trim();
+  if (busy || (!text && !pendingPhotos.length)) return;
   if (!aiAllowed()) { renderChat(); return; }
-  chat.push({ role: 'user', content: text }); input.value = ''; growComposer();
+  if (!text) text = 'צירפתי תמונה – עדכן את היומן לפי מה שרואים בה.';
+  const photos = pendingPhotos.map((p) => ({ id: p.id, thumb: p.thumb }));
+  const sendImgs = pendingPhotos.map((p) => ({ mime: 'image/jpeg', data: p.dataUrl.split(',')[1] }));
+  chat.push({ role: 'user', content: text, ...(photos.length ? { photos } : {}) });
+  pendingPhotos = []; renderPendingPhotos();
+  input.value = ''; growComposer();
   busy = true; persistChat(); renderChat(); scrollChat(); $('#chatSend').disabled = true;
   try {
-    const { text: raw } = await callAI({ messages: buildApiMessages() });
+    const messages = buildApiMessages();
+    if (sendImgs.length) messages[messages.length - 1].images = sendImgs;
+    const { text: raw } = await callAI({ messages });
     let parsed;
     try { parsed = parseJSONLoose(raw); } catch { parsed = { reply: raw, log: null }; }
     const base = readForm();
@@ -727,8 +740,17 @@ async function sendChat() {
   }
 }
 
-function approvePreview(i) {
+/** Photos sent in the chat since the last approved preview (up to preview i) that are not yet attached to a log. */
+function unattachedPhotos(i) {
+  let start = 0;
+  for (let k = i - 1; k >= 0; k--) if (chat[k].approved) { start = k + 1; break; }
+  return chat.slice(start, i).filter((m) => m.role === 'user' && m.photos).flatMap((m) => m.photos.filter((p) => !p.attached));
+}
+
+async function approvePreview(i) {
   const m = chat[i]; if (!m || !m.log) return;
+  const attach = $('#pvAttach') ? $('#pvAttach').checked : false;
+  const toAttach = attach ? unattachedPhotos(i) : [];
   const log = m.log;
   if (log.date && log.date !== current.date) loadDate(log.date);
   Object.assign(current, {
@@ -739,8 +761,150 @@ function approvePreview(i) {
   saveCurrent(true);
   m.approved = true; persistChat();
   showView('log');
-  toast('היומן מולא ונשמר ✓');
+  if (toAttach.length) {
+    $('#busyText').textContent = 'מעלה תמונות…'; $('#busy').hidden = false;
+    try {
+      const n = await attachPhotosToDay(current.date, toAttach);
+      toast(`היומן מולא ונשמר ✓ · ${n} תמונות צורפו`);
+    } catch (e) { toast('היומן נשמר, אבל העלאת התמונות נכשלה: ' + (e.message || e)); }
+    finally { $('#busy').hidden = true; $('#busyText').textContent = 'מכין קובץ…'; }
+  } else toast('היומן מולא ונשמר ✓');
 }
+
+/* ---------------- photos: capture, resize, IndexedDB cache, Supabase Storage ---------------- */
+const MAX_PHOTOS = 4;
+const PHOTO_BUCKET = 'log-photos';
+let pendingPhotos = []; // [{id, dataUrl, thumb}] – selected in the composer, not yet sent
+
+const photoDB = {
+  _db: null,
+  open() {
+    if (this._db) return this._db;
+    this._db = new Promise((res, rej) => {
+      const r = indexedDB.open('bmb-photos', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('img');
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    });
+    return this._db;
+  },
+  async tx(mode, fn) { const db = await this.open(); return new Promise((res, rej) => { const t = db.transaction('img', mode); const st = t.objectStore('img'); const out = fn(st); t.oncomplete = () => res(out && out.result); t.onerror = () => rej(t.error); }); },
+  put(k, v) { return this.tx('readwrite', (st) => { st.put(v, k); }); },
+  get(k) { return this.tx('readonly', (st) => st.get(k)); },
+  clear() { return this.tx('readwrite', (st) => { st.clear(); }); },
+};
+
+/** Resize to fit maxSide and encode JPEG. Returns dataUrl. */
+function imageToJpeg(file, maxSide = 1600, quality = 0.8) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const k = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+      const w = Math.max(1, Math.round(img.naturalWidth * k)), h = Math.max(1, Math.round(img.naturalHeight * k));
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, w, h); x.imageSmoothingQuality = 'high'; x.drawImage(img, 0, 0, w, h);
+      let d = c.toDataURL('image/jpeg', quality);
+      if (d.length > 1400000) d = c.toDataURL('image/jpeg', 0.62);
+      resolve({ dataUrl: d, w, h });
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('לא ניתן לקרוא את התמונה')); };
+    img.src = url;
+  });
+}
+function dataUrlToBlob(d) {
+  const [head, b64] = d.split(','); const bin = atob(b64); const u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return new Blob([u], { type: head.match(/data:([^;]+)/)[1] });
+}
+const newId = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+
+async function addPickedFiles(files) {
+  const list = [...files].filter((f) => /^image\//.test(f.type) || /\.(jpe?g|png|heic|heif|webp)$/i.test(f.name));
+  const room = MAX_PHOTOS - pendingPhotos.length;
+  if (!room) return toast(`אפשר לצרף עד ${MAX_PHOTOS} תמונות להודעה`);
+  if (list.length > room) toast(`נוספו ${room} תמונות בלבד (מקסימום ${MAX_PHOTOS})`);
+  for (const f of list.slice(0, room)) {
+    try {
+      const full = await imageToJpeg(f, 1600, 0.8);
+      const th = await imageToJpeg(dataUrlToBlob(full.dataUrl), 220, 0.7);
+      const id = newId();
+      await photoDB.put(id, full.dataUrl).catch(() => {});
+      pendingPhotos.push({ id, dataUrl: full.dataUrl, thumb: th.dataUrl, w: full.w, h: full.h });
+    } catch (e) { toast(e.message || 'שגיאה בתמונה'); }
+  }
+  renderPendingPhotos();
+}
+function renderPendingPhotos() {
+  const box = $('#composerPhotos');
+  box.hidden = !pendingPhotos.length;
+  box.innerHTML = pendingPhotos.map((p, i) => `<div class="cp-thumb"><img src="${p.thumb}" alt=""><button type="button" data-i="${i}" aria-label="הסר תמונה">✕</button></div>`).join('')
+    + (pendingPhotos.length ? `<small>${pendingPhotos.length}/${MAX_PHOTOS}</small>` : '');
+  $('#camBtn').classList.toggle('has', pendingPhotos.length > 0);
+}
+
+/** Upload chat photos (from IndexedDB) to Storage under <uid>/<date>/ and add them to that day's log. */
+async function attachPhotosToDay(date, photos) {
+  if (!navigator.onLine) throw new Error('אין חיבור');
+  const added = [];
+  for (const p of photos) {
+    const d = await photoDB.get(p.id).catch(() => null);
+    if (!d) continue;
+    const path = `${uid()}/${date}/${p.id}.jpg`;
+    const { error } = await sb.storage.from(PHOTO_BUCKET).upload(path, dataUrlToBlob(d), { contentType: 'image/jpeg', upsert: true });
+    if (error) throw error;
+    added.push({ path, at: new Date().toISOString() });
+    p.attached = true;
+  }
+  persistChat();
+  if (!added.length) return 0;
+  if (current.date !== date) loadDate(date);
+  current.photos = [...(current.photos || []), ...added];
+  dirty = true; saveCurrent(true); syncNow();
+  await photoUrls.ensure(added.map((x) => x.path));
+  renderDayPhotos();
+  return added.length;
+}
+
+/** Signed URL cache (7 days) – also used to put links in the WhatsApp text. */
+const photoUrls = {
+  map: {},
+  peek(path) { const v = this.map[path]; return v && v.exp > Date.now() + 3600e3 ? v.url : null; },
+  async ensure(paths) {
+    const need = paths.filter((p) => !this.peek(p));
+    if (!need.length || !navigator.onLine) return;
+    const { data, error } = await sb.storage.from(PHOTO_BUCKET).createSignedUrls(need, 7 * 86400);
+    if (error || !data) return;
+    data.forEach((d) => { if (d.signedUrl) this.map[d.path] = { url: d.signedUrl, exp: Date.now() + 7 * 86400e3 }; });
+  },
+};
+
+function photoGrid(photos, removable) {
+  return photos.map((p, i) => {
+    const u = photoUrls.peek(p.path);
+    return `<div class="dp-thumb" data-i="${i}">${u ? `<img src="${u}" alt="" loading="lazy" data-full="${esc(u)}">` : '<span>📷</span>'}${removable ? `<button type="button" data-del="${i}" aria-label="הסר תמונה">✕</button>` : ''}</div>`;
+  }).join('');
+}
+async function renderDayPhotos() {
+  const ph = current.photos || [], box = $('#dayPhotos');
+  $('#dayPhotosField').hidden = !ph.length;
+  if (!ph.length) { box.innerHTML = ''; return; }
+  box.innerHTML = photoGrid(ph, true);
+  const missing = ph.filter((p) => !photoUrls.peek(p.path));
+  if (missing.length && navigator.onLine) {
+    const date = current.date;
+    await photoUrls.ensure(missing.map((p) => p.path));
+    if (current.date === date) box.innerHTML = photoGrid(current.photos || [], true);
+  }
+}
+async function removeDayPhoto(i) {
+  const p = (current.photos || [])[i]; if (!p) return;
+  if (!confirm('להסיר את התמונה מהיומן?')) return;
+  current.photos = current.photos.filter((_, k) => k !== i);
+  dirty = true; saveCurrent(true); renderDayPhotos();
+  if (navigator.onLine && p.path.startsWith(uid() + '/')) sb.storage.from(PHOTO_BUCKET).remove([p.path]).catch(() => {});
+}
+function openPhoto(url) { $('#photoViewImg').src = url; $('#photoView').hidden = false; }
 
 function growComposer() { const t = $('#chatInput'); t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight + 2, 160) + 'px'; }
 
@@ -910,7 +1074,7 @@ function showView(name) {
   if (name === 'users' && !isAdmin()) name = 'settings';
   $$('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${name}`));
   $$('.tabbar button').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
-  if (name === 'history') { renderHistory(); renderExportUI(); renderHistUserPicker(); }
+  if (name === 'history') { renderHistory(); renderExportUI(); renderHistUserPicker(); photoUrls.ensure(histSource().flatMap((e) => (e.photos || []).map((p) => p.path)).slice(0, 200)).catch(() => {}); }
   if (name === 'chat') { renderChat(); setTimeout(scrollChat, 30); }
   if (name === 'settings') renderSettings();
   if (name === 'users') { renderUsers(); loadUsers().catch((e) => toast(e.message)); }
@@ -969,6 +1133,8 @@ function init() {
   $('#printBtn').addEventListener('click', printLog);
   $('#clearDayBtn').addEventListener('click', () => {
     if (!confirm(`למחוק את היומן של ${fmtDate(current.date)}?`)) return;
+    const ph = (current.photos || []).map((p) => p.path).filter((p) => p.startsWith(uid() + '/'));
+    if (ph.length && navigator.onLine) sb.storage.from(PHOTO_BUCKET).remove(ph).catch(() => {});
     store.del(current.date); current = blankEntry(current.date); dirty = false; fillForm(current); updateStatus(); toast('היום נמחק');
   });
   window.addEventListener('beforeprint', () => { readForm(); buildPrint(current); });
@@ -991,7 +1157,10 @@ function init() {
     const act = btn.dataset.act;
     if (act === 'open') { loadDate(en.date); showView('log'); }
     if (act === 'wa') window.open('https://wa.me/?text=' + encodeURIComponent(logTextFor(en)), '_blank');
-    if (act === 'view') { $('#viewSheetText').textContent = logTextFor(en).replace(/\*/g, ''); $('#viewSheet').hidden = false; }
+    if (act === 'view') {
+      $('#viewSheetText').textContent = logTextFor(en).replace(/\*/g, ''); $('#viewSheetPhotos').innerHTML = ''; $('#viewSheet').hidden = false;
+      if ((en.photos || []).length) photoUrls.ensure(en.photos.map((p) => p.path)).then(() => { $('#viewSheetPhotos').innerHTML = photoGrid(en.photos, false); $('#viewSheetText').textContent = logTextFor(en).replace(/\*/g, ''); });
+    }
     if (act === 'xlsx') runExport([en], { foreman: en._owner });
     if (act === 'del' && confirm(`למחוק את היומן של ${fmtDate(en.date)}?`)) {
       store.del(en.date); if (en.date === current.date) { dirty = false; loadDate(en.date); } renderHistory(); renderExportUI(); toast('נמחק');
@@ -1010,7 +1179,20 @@ function init() {
     if (btn.dataset.act === 'approve') approvePreview(i);
     if (btn.dataset.act === 'fix') { const t = $('#chatInput'); t.placeholder = 'מה לתקן? למשל: היו 4 פועלים ולא 3, וסיימנו ב-17:00'; t.focus(); }
   });
-  $('#newChat').addEventListener('click', () => { if (!chat.length || confirm('להתחיל שיחה חדשה?')) { chat = []; persistChat(); renderChat(); } });
+  $('#newChat').addEventListener('click', () => { if (!chat.length || confirm('להתחיל שיחה חדשה?')) { chat = []; pendingPhotos = []; renderPendingPhotos(); photoDB.clear().catch(() => {}); persistChat(); renderChat(); } });
+  // camera / gallery
+  $('#camBtn').addEventListener('click', () => { if (!aiAllowed()) return; $('#camSheet').hidden = false; });
+  $('#camTake').addEventListener('click', () => { $('#camSheet').hidden = true; $('#camInput').click(); });
+  $('#camGallery').addEventListener('click', () => { $('#camSheet').hidden = true; $('#galleryInput').click(); });
+  $('#camCancel').addEventListener('click', () => { $('#camSheet').hidden = true; });
+  ['#camInput', '#galleryInput'].forEach((id) => $(id).addEventListener('change', async (e) => { const f = [...e.target.files]; e.target.value = ''; if (f.length) await addPickedFiles(f); }));
+  $('#composerPhotos').addEventListener('click', (e) => { const b = e.target.closest('button[data-i]'); if (!b) return; pendingPhotos.splice(+b.dataset.i, 1); renderPendingPhotos(); });
+  $('#dayPhotos').addEventListener('click', (e) => {
+    const d = e.target.closest('[data-del]'); if (d) return removeDayPhoto(+d.dataset.del);
+    const img = e.target.closest('img[data-full]'); if (img) openPhoto(img.dataset.full);
+  });
+  $('#viewSheetPhotos').addEventListener('click', (e) => { const img = e.target.closest('img[data-full]'); if (img) openPhoto(img.dataset.full); });
+  $('#photoView').addEventListener('click', () => { $('#photoView').hidden = true; $('#photoViewImg').src = ''; });
 
   // settings – account
   $('#passForm').addEventListener('submit', (e) => { e.preventDefault(); changePassword(); });

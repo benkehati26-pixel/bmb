@@ -35,7 +35,14 @@ Rules:
 - "date": the date given in the context unless he says otherwise ("אתמול" → previous day).
 - "notes": safety issues, delays, deliveries/supplies, instructions, visits (מפקח, יועץ, קונסטרוקטור), problems. Professional phrasing.
 - Never invent facts, names, numbers or times. Unknown fields stay as in the current form (or "").
-- Hebrew only in values (except proper names/numbers).`;
+- Hebrew only in values (except proper names/numbers).
+
+Photos: the foreman may attach photos to a message (site work, delivery notes / תעודות משלוח, equipment, handwritten notes, whiteboards, plans). Read them carefully and use them together with his text:
+- Delivery note (תעודת משלוח / חשבונית / תעודת שקילה): add to "notes" one line per delivery, e.g. "• התקבלה אספקה: בטון ב-30, 12 קוב – ספק: רדימיקס (ת.מ. 45871)." Use only what is legible: material, quantity + unit, supplier, document number, time if shown.
+- Handwritten note / whiteboard: transcribe it into the right fields (crew, hours, work, notes), fixing spelling.
+- Site / work photo: add to "work" only work that is clearly visible or confirmed by his text, in professional terms. Equipment clearly working on site (מחפר, מנוף, משאבת בטון...) may be added to "crew" as "ציוד".
+- Never guess unreadable numbers or names; if something important is unclear in a photo, say so briefly in "reply" and ask.
+- In "reply", mention in one short sentence what you read from the photos.`;
 
 function cors(req: Request) {
   const o = req.headers.get('origin') || '';
@@ -49,7 +56,9 @@ function cors(req: Request) {
 const json = (req: Request, status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { ...cors(req), 'content-type': 'application/json; charset=utf-8' } });
 
-type Msg = { role: 'user' | 'assistant'; content: string };
+type Img = { mime: string; data: string };
+type Msg = { role: 'user' | 'assistant'; content: string; images?: Img[] };
+const MAX_IMAGES = 4, MAX_IMAGE_B64 = 3_000_000, IMG_MIME = ['image/jpeg', 'image/png', 'image/webp'];
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors(req) });
@@ -81,6 +90,14 @@ Deno.serve(async (req) => {
   const trimmed = msgs.slice(-20);
   const total = trimmed.reduce((a, m) => a + m.content.length, 0);
   if (total > 40000) return json(req, 413, { error: 'השיחה ארוכה מדי – התחל שיחה חדשה' });
+  // images: only on the latest user message
+  const last = trimmed[trimmed.length - 1];
+  const imgs = Array.isArray(last.images) ? last.images : [];
+  if (imgs.length > MAX_IMAGES) return json(req, 400, { error: `אפשר לצרף עד ${MAX_IMAGES} תמונות להודעה` });
+  for (const im of imgs) {
+    if (!im || typeof im.data !== 'string' || !IMG_MIME.includes(im.mime)) return json(req, 400, { error: 'סוג תמונה לא נתמך' });
+    if (im.data.length > MAX_IMAGE_B64) return json(req, 413, { error: 'תמונה גדולה מדי' });
+  }
 
   const { data: n, error: be } = await service.rpc('ai_bump', { p_user: uid, p_limit: DAILY_LIMIT });
   if (be) return json(req, 500, { error: 'שגיאת שרת (מונה)' });
@@ -88,7 +105,13 @@ Deno.serve(async (req) => {
 
   const key = Deno.env.get('GEMINI_API_KEY');
   if (!key) return json(req, 500, { error: 'מפתח AI לא מוגדר בשרת' });
-  const contents = trimmed.map((m) => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }));
+  const contents: { role: string; parts: Record<string, unknown>[] }[] = trimmed.map((m, i) => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [
+      ...(i === trimmed.length - 1 ? imgs.map((im) => ({ inline_data: { mime_type: im.mime, data: im.data } })) : []),
+      { text: m.content + (i === trimmed.length - 1 && imgs.length ? `\n\n[צורפו ${imgs.length} תמונות]` : '') },
+    ],
+  }));
   while (contents.length && contents[0].role !== 'user') contents.shift();
 
   let lastErr = '';
@@ -104,7 +127,7 @@ Deno.serve(async (req) => {
             contents,
             generationConfig: { temperature: 0.2, maxOutputTokens: 4096, responseMimeType: 'application/json' },
           }),
-          signal: AbortSignal.timeout(45000),
+          signal: AbortSignal.timeout(imgs.length ? 70000 : 45000),
         });
       } catch (e) { lastErr = `network: ${String(e).slice(0, 80)}`; continue; }
       if (res.ok) {

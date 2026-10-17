@@ -134,6 +134,11 @@
         <span>📝 הערות</span>
         <textarea id="f-notes" rows="3" placeholder="בטיחות, עיכובים, אספקות, ביקור מפקח..."></textarea>
       </label>
+
+      <div class="field" id="dayPhotosField" hidden>
+        <span>📷 תמונות מהיום</span>
+        <div id="dayPhotos" class="day-photos"></div>
+      </div>
     </form>
 
     <div class="actions">
@@ -154,12 +159,16 @@
     <div class="chat-head">
       <div>
         <h2>✨ עוזר AI</h2>
-        <p>כתוב חופשי מה היה היום – אנסח יומן מקצועי ואמלא אחרי אישורך.</p>
+        <p>כתוב חופשי או צלם (📷) – תעודות משלוח, עבודה באתר, פתקים. אנסח יומן מקצועי ואמלא אחרי אישורך.</p>
       </div>
       <button class="link-btn" id="newChat">שיחה חדשה</button>
     </div>
     <div id="chatLog" class="chat-log"></div>
     <div class="composer">
+      <div id="composerPhotos" class="composer-photos" hidden></div>
+      <button id="camBtn" class="cam" type="button" aria-label="צרף תמונה">📷</button>
+      <input type="file" id="camInput" accept="image/*" capture="environment" hidden>
+      <input type="file" id="galleryInput" accept="image/*" multiple hidden>
       <textarea id="chatInput" rows="1" placeholder="למשל: היו היום 3 פועלים של מאג'ד, מחפר, יצקנו כלונסאות 12-15, עבדנו 7 עד 16"></textarea>
       <button id="chatSend" class="send" aria-label="שלח"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M3.4 20.4 21 12 3.4 3.6 3.4 10l12.6 2-12.6 2z" transform="matrix(-1 0 0 1 24 0)"/></svg></button>
     </div>
@@ -323,9 +332,21 @@
 <div id="viewSheet" class="sheet" hidden>
   <div class="sheet-card" role="dialog" aria-modal="true">
     <pre id="viewSheetText" class="view-text"></pre>
+    <div id="viewSheetPhotos" class="day-photos"></div>
     <button class="btn" id="viewClose">סגור</button>
   </div>
 </div>
+<div id="camSheet" class="sheet" hidden>
+  <div class="sheet-card" role="dialog" aria-modal="true" aria-label="צירוף תמונה">
+    <div class="sheet-icon">📷</div>
+    <b>צירוף תמונה לעוזר</b>
+    <small class="muted">עד 4 תמונות להודעה: עבודה באתר, תעודות משלוח, ציוד, פתקים בכתב יד.</small>
+    <button class="btn primary big" id="camTake">📸 צלם</button>
+    <button class="btn" id="camGallery">🖼️ מהגלריה</button>
+    <button class="btn" id="camCancel">ביטול</button>
+  </div>
+</div>
+<div id="photoView" class="photo-view" hidden><img id="photoViewImg" alt=""></div>
 <div id="busy" class="busy" hidden><div class="spinner"></div><span id="busyText">מכין קובץ…</span></div>
 
 <div id="toast" role="status" aria-live="polite"></div>
